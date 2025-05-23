@@ -1,0 +1,51 @@
+[project]
+name = "dia-fastapi-server"
+version = "1.0.0"
+description = "FastAPI server for Dia TTS model with multi-GPU support and SillyTavern compatibility"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+
+dependencies = [
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
+    "torch>=2.6.0",
+    "numpy>=2.0.0",
+    "soundfile>=0.13.1",
+    "librosa>=0.10.0",
+    "pydantic>=2.0.0",
+    "rich>=13.0.0",
+    "python-multipart>=0.0.6",
+    "dia @ git+https://github.com/nari-labs/dia.git",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "httpx>=0.25.0",
+    "ruff>=0.1.0",
+]
+
+docker = [
+    "gunicorn>=21.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project.urls]
+"Homepage" = "https://github.com/yourusername/dia-fastapi-server"
+"Bug Tracker" = "https://github.com/yourusername/dia-fastapi-server/issues"
+
+[tool.ruff]
+lint.ignore = ["C901", "E501", "E741", "W605"]
+lint.select = ["C", "E", "F", "I", "W"]
+line-length = 119
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["E402", "F401", "F403", "F811"]
+
+[tool.ruff.lint.isort]
+lines-after-imports = 2
