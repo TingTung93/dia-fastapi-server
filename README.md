@@ -19,7 +19,7 @@ A high-performance FastAPI server for the Dia text-to-speech model with multi-GP
 
 - Python 3.11 or higher
 - CUDA-capable GPU (recommended) or CPU
-- Hugging Face token for model download
+- ~3.2GB disk space for model download
 
 ### Installation
 
@@ -29,15 +29,16 @@ git clone https://github.com/yourusername/dia-fastapi-server.git
 cd dia-fastapi-server
 ```
 
-2. Install dependencies:
+2. Run the server (dependencies will be installed automatically):
 ```bash
-pip install -r requirements.txt
+python start_server.py
 ```
 
-3. Set your Hugging Face token:
-```bash
-export HF_TOKEN="your_huggingface_token"
-```
+The startup script will:
+- Create a virtual environment if needed
+- Install all required dependencies
+- Download the Dia model on first run (~3.2GB)
+- Start the server
 
 ### Running the Server
 

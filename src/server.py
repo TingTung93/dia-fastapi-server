@@ -1653,7 +1653,6 @@ if __name__ == "__main__":
     SERVER_CONFIG.output_retention_hours = args.retention_hours
     
     print(f"Starting Dia TTS Server on {args.host}:{args.port}")
-    print("Make sure you have set the HF_TOKEN environment variable!")
     print(f"SillyTavern endpoint: http://{args.host}:{args.port}/v1/audio/speech")
     print(f"Configuration API: http://{args.host}:{args.port}/v1/config")
     print(f"Generation logs: http://{args.host}:{args.port}/v1/logs")
