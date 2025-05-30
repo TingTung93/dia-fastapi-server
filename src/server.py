@@ -241,6 +241,9 @@ WORKER_GPU_ASSIGNMENT: Dict[int, int] = {}  # Worker ID -> GPU ID
 NEXT_GPU = 0  # For round-robin assignment
 NEXT_SYNC_GPU = 0  # For synchronous requests
 
+# Thread lock for Rich console displays
+CONSOLE_LOCK = threading.Lock()
+
 
 def load_model():
     """Load the Dia model on startup"""
@@ -295,25 +298,26 @@ def load_single_model():
         
         console.print(f"[cyan]Device: {device}, Precision: {compute_dtype}[/cyan]")
         
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-            console=console
-        ) as progress:
-            task = progress.add_task("[cyan]Loading Dia model from Hugging Face...[/cyan]", total=100)
-            
-            # Simulate progress during download
-            progress.update(task, advance=30)
-            
-            model = Dia.from_pretrained(
-                "nari-labs/Dia-1.6B", 
-                compute_dtype=compute_dtype,
-                device=device
-            )
-            
-            progress.update(task, completed=100)
+        with CONSOLE_LOCK:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                console=console
+            ) as progress:
+                task = progress.add_task("[cyan]Loading Dia model from Hugging Face...[/cyan]", total=100)
+                
+                # Simulate progress during download
+                progress.update(task, advance=30)
+                
+                model = Dia.from_pretrained(
+                    "nari-labs/Dia-1.6B", 
+                    compute_dtype=compute_dtype,
+                    device=device
+                )
+                
+                progress.update(task, completed=100)
         
         console.print("[bold green]✓ Dia model loaded successfully![/bold green]")
         
@@ -326,45 +330,46 @@ def load_multi_gpu_models():
     """Load one model instance per GPU"""
     global GPU_MODELS
     
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        console=console
-    ) as progress:
-        main_task = progress.add_task(
-            f"[cyan]Loading models on {len(ALLOWED_GPUS)} GPUs...[/cyan]", 
-            total=len(ALLOWED_GPUS)
-        )
-        
-        for gpu_id in ALLOWED_GPUS:
-            try:
-                device = torch.device(f"cuda:{gpu_id}")
-                
-                # Check compute capability for this specific GPU
-                with torch.cuda.device(gpu_id):
-                    if torch.cuda.is_bf16_supported():
-                        compute_dtype = "bfloat16"
-                        console.print(f"[green]GPU {gpu_id}: Using BFloat16 precision[/green]")
-                    else:
-                        compute_dtype = "float16"
-                        console.print(f"[yellow]GPU {gpu_id}: Using Float16 precision[/yellow]")
-                
-                console.print(f"[cyan]Loading model on GPU {gpu_id}...[/cyan]")
-                
-                GPU_MODELS[gpu_id] = Dia.from_pretrained(
-                    "nari-labs/Dia-1.6B",
-                    compute_dtype=compute_dtype,
-                    device=device
-                )
-                
-                console.print(f"[green]✓ Model loaded successfully on GPU {gpu_id}[/green]")
-                progress.advance(main_task)
-                
-            except Exception as e:
-                console.print(f"[red]✗ Error loading model on GPU {gpu_id}: {e}[/red]")
-                # Continue loading on other GPUs
+    with CONSOLE_LOCK:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            console=console
+        ) as progress:
+            main_task = progress.add_task(
+                f"[cyan]Loading models on {len(ALLOWED_GPUS)} GPUs...[/cyan]", 
+                total=len(ALLOWED_GPUS)
+            )
+            
+            for gpu_id in ALLOWED_GPUS:
+                try:
+                    device = torch.device(f"cuda:{gpu_id}")
+                    
+                    # Check compute capability for this specific GPU
+                    with torch.cuda.device(gpu_id):
+                        if torch.cuda.is_bf16_supported():
+                            compute_dtype = "bfloat16"
+                            console.print(f"[green]GPU {gpu_id}: Using BFloat16 precision[/green]")
+                        else:
+                            compute_dtype = "float16"
+                            console.print(f"[yellow]GPU {gpu_id}: Using Float16 precision[/yellow]")
+                    
+                    console.print(f"[cyan]Loading model on GPU {gpu_id}...[/cyan]")
+                    
+                    GPU_MODELS[gpu_id] = Dia.from_pretrained(
+                        "nari-labs/Dia-1.6B",
+                        compute_dtype=compute_dtype,
+                        device=device
+                    )
+                    
+                    console.print(f"[green]✓ Model loaded successfully on GPU {gpu_id}[/green]")
+                    progress.advance(main_task)
+                    
+                except Exception as e:
+                    console.print(f"[red]✗ Error loading model on GPU {gpu_id}: {e}[/red]")
+                    # Continue loading on other GPUs
     
     if not GPU_MODELS:
         raise RuntimeError("Failed to load model on any GPU")
@@ -672,54 +677,80 @@ def generate_audio_from_text(
         # Generate with proper audio prompt handling
         generation_start = time.time()
         
-        # Create progress bar for generation
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-            TimeElapsedColumn(),
-            console=console,
-            transient=True
-        ) as progress:
-            # Add generation task
-            gen_task = progress.add_task(
-                f"[cyan]Generating audio on GPU {gpu_id}...[/cyan]",
-                total=100
-            )
-            
-            # Update progress periodically (we'll simulate progress since model doesn't provide callbacks)
-            def update_progress():
-                elapsed = 0
-                while elapsed < 30:  # Max 30 seconds timeout
-                    time.sleep(0.1)
-                    elapsed = time.time() - generation_start
-                    # Simulate progress based on typical generation time (3-5 seconds)
-                    simulated_progress = min(95, (elapsed / 4.0) * 100)
-                    progress.update(gen_task, completed=simulated_progress)
-                    if hasattr(update_progress, 'stop'):
-                        break
-            
-            # Start progress updater in background
-            progress_thread = threading.Thread(target=update_progress, daemon=True)
-            progress_thread.start()
-            
+        # Only show progress in debug mode or if there's only one worker
+        show_progress = SERVER_CONFIG.debug_mode or MAX_WORKERS == 1
+        
+        if show_progress:
             try:
-                # Set verbose=True to get token speed info from model
-                generation_params['verbose'] = SERVER_CONFIG.debug_mode
+                with CONSOLE_LOCK:  # Ensure only one progress display at a time
+                    with Progress(
+                        SpinnerColumn(),
+                        TextColumn("[progress.description]{task.description}"),
+                        BarColumn(),
+                        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                        TimeElapsedColumn(),
+                        console=console,
+                        transient=True
+                    ) as progress:
+                        # Add generation task
+                        gen_task = progress.add_task(
+                            f"[cyan]Generating audio on GPU {gpu_id}...[/cyan]",
+                            total=100
+                        )
+                        
+                        # Update progress periodically (we'll simulate progress since model doesn't provide callbacks)
+                        stop_progress = threading.Event()
+                        def update_progress():
+                            elapsed = 0
+                            while not stop_progress.is_set() and elapsed < 30:  # Max 30 seconds timeout
+                                time.sleep(0.1)
+                                elapsed = time.time() - generation_start
+                                # Simulate progress based on typical generation time (3-5 seconds)
+                                simulated_progress = min(95, (elapsed / 4.0) * 100)
+                                progress.update(gen_task, completed=simulated_progress)
+                        
+                        # Start progress updater in background
+                        progress_thread = threading.Thread(target=update_progress, daemon=True)
+                        progress_thread.start()
+                        
+                        try:
+                            # Set verbose=True to get token speed info from model
+                            generation_params['verbose'] = SERVER_CONFIG.debug_mode
+                            
+                            audio_output = model_instance.generate(
+                                processed_text,
+                                audio_prompt=audio_prompt,  # Dia will handle the batching internally
+                                **generation_params
+                            )
+                            
+                            # Stop progress thread
+                            stop_progress.set()
+                            progress.update(gen_task, completed=100)
+                            
+                        finally:
+                            stop_progress.set()
+                            if progress_thread.is_alive():
+                                progress_thread.join(timeout=0.5)
+            except Exception as e:
+                # Catch any Rich display errors and continue
+                if SERVER_CONFIG.debug_mode:
+                    console.print(f"[yellow]Progress display error: {e}[/yellow]")
                 
+                # Still generate audio without progress display
+                generation_params['verbose'] = SERVER_CONFIG.debug_mode
                 audio_output = model_instance.generate(
                     processed_text,
-                    audio_prompt=audio_prompt,  # Dia will handle the batching internally
+                    audio_prompt=audio_prompt,
                     **generation_params
                 )
-                
-                # Stop progress thread
-                update_progress.stop = True
-                progress.update(gen_task, completed=100)
-                
-            finally:
-                update_progress.stop = True
+        else:
+            # No progress display for concurrent workers
+            generation_params['verbose'] = SERVER_CONFIG.debug_mode
+            audio_output = model_instance.generate(
+                processed_text,
+                audio_prompt=audio_prompt,
+                **generation_params
+            )
         
         # Apply speed adjustment if needed
         if speed != 1.0 and audio_output is not None:

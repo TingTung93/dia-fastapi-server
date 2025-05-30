@@ -20,8 +20,11 @@ A high-performance FastAPI server for the Dia text-to-speech model with multi-GP
 - Python 3.11 or higher
 - CUDA-capable GPU (recommended) or CPU
 - ~3.2GB disk space for model download
+- Git (for cloning the repository)
 
 ### Installation
+
+#### Method 1: Automatic Installation (Recommended)
 
 1. Clone the repository:
 ```bash
@@ -39,6 +42,48 @@ The startup script will:
 - Install all required dependencies
 - Download the Dia model on first run (~3.2GB)
 - Start the server
+
+#### Method 2: Manual Installation
+
+1. Clone the repository:
+```bash
+git clone https://github.com/yourusername/dia-fastapi-server.git
+cd dia-fastapi-server
+```
+
+2. Create and activate a virtual environment:
+```bash
+python -m venv venv
+
+# On Windows
+venv\Scripts\activate
+
+# On macOS/Linux
+source venv/bin/activate
+```
+
+3. Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+4. Run the server:
+```bash
+python src/server.py
+```
+
+#### Method 3: Docker Installation
+
+1. Clone the repository:
+```bash
+git clone https://github.com/yourusername/dia-fastapi-server.git
+cd dia-fastapi-server
+```
+
+2. Build and run with Docker Compose:
+```bash
+docker-compose up -d
+```
 
 ### Running the Server
 
@@ -225,20 +270,173 @@ docker run -d \
 
 ## Troubleshooting
 
-### CUDA Out of Memory
+### Installation Issues
+
+#### Python Version Error
+**Problem**: `Python 3.11+ is required`
+**Solution**: 
+- Check your Python version: `python --version`
+- Install Python 3.11 or higher from [python.org](https://python.org)
+- On Ubuntu/Debian: `sudo apt update && sudo apt install python3.11`
+- On macOS with Homebrew: `brew install python@3.11`
+
+#### Virtual Environment Creation Fails
+**Problem**: `Error creating virtual environment`
+**Solution**:
+- Ensure python-venv is installed: `sudo apt install python3.11-venv` (Ubuntu/Debian)
+- Try creating manually: `python -m venv venv`
+- Use absolute paths if needed
+
+#### Dependency Installation Errors
+**Problem**: `pip install fails with error`
+**Solution**:
+- Update pip: `pip install --upgrade pip`
+- Try installing with legacy resolver: `pip install -r requirements.txt --use-deprecated=legacy-resolver`
+- For PyTorch issues, install manually: `pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121`
+
+### GPU/CUDA Issues
+
+#### CUDA Not Available
+**Problem**: `CUDA is not available. GPU mode disabled.`
+**Solution**:
+- Check NVIDIA driver: `nvidia-smi`
+- Install CUDA toolkit: Visit [NVIDIA CUDA Downloads](https://developer.nvidia.com/cuda-downloads)
+- Verify PyTorch CUDA: `python -c "import torch; print(torch.cuda.is_available())"`
+- Reinstall PyTorch with CUDA support
+
+#### CUDA Out of Memory
+**Problem**: `RuntimeError: CUDA out of memory`
+**Solution**:
 - Reduce worker count: `--workers 1`
 - Use single GPU mode: `--gpu-mode single`
-- Use float16 precision (automatic on most GPUs)
+- Clear GPU cache: Add `torch.cuda.empty_cache()` in code
+- Monitor GPU memory: `nvidia-smi -l 1`
+- Use CPU mode as fallback: `python start_server.py --gpu-mode cpu`
 
-### Slow Generation
-- Enable torch.compile (default)
-- Use GPU instead of CPU
-- Check GPU utilization with `--debug`
+#### Multiple GPU Detection Issues
+**Problem**: `Only detecting one GPU when multiple are available`
+**Solution**:
+- Check all GPUs are visible: `nvidia-smi`
+- Set CUDA_VISIBLE_DEVICES: `export CUDA_VISIBLE_DEVICES=0,1,2`
+- Force multi-GPU mode: `--gpu-mode multi --gpus "0,1,2"`
+- Check PyTorch GPU count: `python -c "import torch; print(torch.cuda.device_count())"`
 
 ### Model Loading Issues
-- Ensure HF_TOKEN is set correctly
-- Check internet connection for model download
-- Verify CUDA installation for GPU support
+
+#### Model Download Fails
+**Problem**: `Failed to download model`
+**Solution**:
+- Check internet connection
+- Set Hugging Face token: `export HF_TOKEN=your_token_here`
+- Try manual download: `huggingface-cli download nari-labs/dia`
+- Use offline mode if model exists: Set environment variable
+- Check disk space (needs ~3.2GB)
+
+#### Model Loading Timeout
+**Problem**: `Model loading takes forever`
+**Solution**:
+- Be patient on first run (model download takes time)
+- Check download progress in terminal
+- Use faster internet connection
+- Pre-download model separately
+
+### Performance Issues
+
+#### Slow Generation
+**Problem**: `Generation is slower than expected`
+**Solution**:
+- Enable torch.compile (default): Remove `--no-torch-compile`
+- Use GPU instead of CPU: Check GPU is being used
+- Check GPU utilization: `nvidia-smi` or use `--debug`
+- Reduce batch size if processing multiple requests
+- Update NVIDIA drivers to latest version
+
+#### High Memory Usage
+**Problem**: `Server using too much RAM/VRAM`
+**Solution**:
+- Reduce retention period: `--retention-hours 1`
+- Lower worker count: `--workers 2`
+- Use garbage collection: Enabled by default
+- Monitor memory: `htop` or `nvidia-smi`
+
+### API/Network Issues
+
+#### Connection Refused
+**Problem**: `curl: (7) Failed to connect to localhost port 7860`
+**Solution**:
+- Check server is running: `ps aux | grep server.py`
+- Check correct port: Default is 7860
+- Try different host: `--host 127.0.0.1`
+- Check firewall settings
+- Verify no other service on port: `lsof -i :7860`
+
+#### CORS Errors
+**Problem**: `Cross-Origin Request Blocked`
+**Solution**:
+- CORS is enabled by default for all origins
+- Check browser console for specific errors
+- Try using proxy for development
+- Verify API endpoint URL is correct
+
+### Docker Issues
+
+#### Docker Build Fails
+**Problem**: `docker build fails with error`
+**Solution**:
+- Update Docker: `docker --version` (need 20.10+)
+- Enable BuildKit: `export DOCKER_BUILDKIT=1`
+- Check disk space for Docker
+- Use CPU Dockerfile if no GPU: `docker build -f Dockerfile.cpu`
+
+#### Container Won't Start
+**Problem**: `Container exits immediately`
+**Solution**:
+- Check logs: `docker logs container_name`
+- Verify GPU support: `docker run --gpus all nvidia/cuda:11.8.0-base nvidia-smi`
+- Check environment variables in docker-compose.yml
+- Ensure proper volume mounts
+
+### Audio Issues
+
+#### Generated Audio is Silent
+**Problem**: `WAV file created but no sound`
+**Solution**:
+- Check input text is not empty
+- Verify audio player supports 44.1kHz WAV
+- Test with simple text: "Hello world"
+- Check volume settings
+
+#### Audio Quality Issues
+**Problem**: `Audio sounds distorted or robotic`
+**Solution**:
+- Adjust temperature: Lower for more stable output
+- Try different voice_id
+- Check audio_prompt quality (if using custom voice)
+- Verify sample rate is correct (44.1kHz)
+
+### Common Error Messages
+
+#### "No module named 'dia'"
+**Solution**: The model will be downloaded automatically on first run. Ensure internet connection.
+
+#### "RuntimeError: Expected all tensors to be on the same device"
+**Solution**: This is a multi-GPU synchronization issue. Use `--gpu-mode single` or update PyTorch.
+
+#### "AssertionError: Torch not compiled with CUDA enabled"
+**Solution**: Install PyTorch with CUDA support. See installation section.
+
+### Getting Help
+
+If you encounter issues not covered here:
+
+1. Check the logs with debug mode: `python start_server.py --debug`
+2. Review recent commits for breaking changes
+3. Search existing GitHub issues
+4. Create a new issue with:
+   - System info (OS, Python version, GPU)
+   - Full error message
+   - Steps to reproduce
+   - Debug logs
 
 ## License
 
