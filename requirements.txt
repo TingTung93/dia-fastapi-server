@@ -14,7 +14,8 @@ numpy>=1.24.0,<2.3.0
 scipy>=1.10.0
 
 # Whisper for automatic transcription
-openai-whisper>=20231117
+# Install Whisper from GitHub for Python 3.13 compatibility
+# Run: pip install git+https://github.com/openai/whisper.git
 
 # Model management
 huggingface_hub>=0.19.0
