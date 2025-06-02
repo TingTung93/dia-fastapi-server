@@ -4,11 +4,12 @@ A high-performance FastAPI server for the Dia text-to-speech model with multi-GP
 
 ## Features
 
-- 🚀 **Multi-GPU Support** - Automatically distributes load across multiple GPUs
+- 🚀 **Multi-GPU Support** - Automatically distributes load across multiple GPUs with CUDA optimization
 - 📊 **Real-time Progress** - Beautiful console output with progress bars and performance metrics
 - 🔄 **Async/Sync Modes** - Support for both immediate and job-based processing
 - 🎙️ **Voice Cloning** - Upload custom audio samples for voice cloning
-- 🎛️ **Flexible Configuration** - Full control over model parameters
+- 🎯 **Whisper Integration** - Automatic transcription of audio prompts for enhanced voice cloning
+- 🎛️ **Flexible Configuration** - Full control over model parameters and generation settings
 - 📝 **Comprehensive Logging** - Debug mode with detailed performance tracking
 - 🐳 **Docker Ready** - Easy deployment with Docker support
 - 🎮 **SillyTavern Compatible** - Compatible TTS API for voice generation
@@ -17,14 +18,40 @@ A high-performance FastAPI server for the Dia text-to-speech model with multi-GP
 
 ### Prerequisites
 
-- Python 3.11 or higher
-- CUDA-capable GPU (recommended) or CPU
-- ~3.2GB disk space for model download
-- Git (for cloning the repository)
+- **Windows 10/11** or **Linux/macOS**
+- **Python 3.11+** (can be installed automatically)
+- **~5GB disk space** for dependencies and model
+- **CUDA-capable GPU** (recommended) or CPU
+- **Internet connection** for downloads
 
 ### Installation
 
-#### Method 1: Automatic Installation (Recommended)
+#### Windows: All-In-One Setup (Recommended)
+
+**Option 1: Batch Script (Easiest)**
+```cmd
+# Download project and run:
+setup_windows_aio.bat
+```
+
+**Option 2: PowerShell (Advanced)**
+```powershell
+# Run as Administrator:
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+.\setup_windows_aio.ps1
+```
+
+The Windows AIO scripts automatically handle:
+- ✅ Python installation (if needed)
+- ✅ Virtual environment setup
+- ✅ All dependencies (PyTorch, FastAPI, Whisper, etc.)
+- ✅ GPU/CUDA configuration
+- ✅ Model downloads
+- ✅ Server startup
+
+📖 **Detailed Windows instructions**: [`docs/WINDOWS_SETUP.md`](docs/WINDOWS_SETUP.md)
+
+#### Linux/macOS: Manual Installation
 
 1. Clone the repository:
 ```bash
@@ -268,6 +295,35 @@ docker run -d \
 - `DIA_GPU_MODE`: Set GPU mode (single/multi/auto)
 - `DIA_GPU_IDS`: Comma-separated list of GPU IDs
 
+## Testing & Validation
+
+The server includes comprehensive test suites to validate functionality:
+
+### CUDA Optimization Tests
+```bash
+python test_cuda_optimizations.py
+```
+Tests multi-GPU functionality, memory management, and performance optimizations.
+
+### Whisper Integration Tests
+```bash
+python test_whisper_integration.py
+```
+Validates automatic transcription, audio prompt processing, and voice cloning with transcripts.
+
+### Basic Functionality Tests
+```bash
+python test_gpu.py
+```
+Tests basic GPU detection and model loading.
+
+### API Test Suite
+```bash
+cd tests/
+pytest -v
+```
+Comprehensive API endpoint testing with the pytest framework.
+
 ## Troubleshooting
 
 ### Installation Issues
@@ -425,18 +481,31 @@ docker run -d \
 #### "AssertionError: Torch not compiled with CUDA enabled"
 **Solution**: Install PyTorch with CUDA support. See installation section.
 
+## Documentation
+
+📚 **Complete documentation available in [`docs/`](docs/) folder:**
+
+- 🖥️ **[Windows Setup](docs/WINDOWS_SETUP.md)** - Complete Windows installation guide
+- 🚀 **[GPU Startup Guide](docs/GPU_STARTUP_GUIDE.md)** - CUDA optimization and multi-GPU setup
+- 🎤 **[Audio Prompts Guide](docs/AUDIO_PROMPT_TRANSCRIPT_GUIDE.md)** - Voice cloning and audio prompts
+- 🎯 **[Whisper Setup](docs/WHISPER_SETUP_GUIDE.md)** - Automatic transcription setup
+- 🎮 **[Speaker Tags](docs/SPEAKER_TAG_GUIDE.md)** - SillyTavern integration
+- 🛠️ **[Development Guide](docs/CLAUDE.md)** - Architecture and development info
+- 🔧 **[Troubleshooting](docs/STARTUP_TROUBLESHOOTING.md)** - Common issues and solutions
+
 ### Getting Help
 
-If you encounter issues not covered here:
+If you encounter issues not covered in the documentation:
 
-1. Check the logs with debug mode: `python start_server.py --debug`
-2. Review recent commits for breaking changes
-3. Search existing GitHub issues
-4. Create a new issue with:
+1. **Check documentation first**: Browse the [`docs/`](docs/) folder for your specific issue
+2. **Enable debug mode**: `python start_server.py --debug`
+3. **Run tests**: `python test_gpu.py` or `python test_whisper_integration.py`
+4. **Search existing GitHub issues**
+5. **Create a new issue** with:
    - System info (OS, Python version, GPU)
-   - Full error message
+   - Full error message and debug logs
    - Steps to reproduce
-   - Debug logs
+   - What documentation you've already checked
 
 ## License
 

@@ -178,16 +178,6 @@ With proper GPU setup:
 - Memory usage: 3-5GB VRAM
 - Tokens/sec: 200-500+
 
-## Apply Server Patch for Environment Variables
-
-To make the server read environment variables:
-
-```bash
-python patch_server_env.py
-```
-
-Then edit `src/server.py` and add the patch code after line 217.
-
 ## Final Checklist
 
 - [ ] CUDA installed and working (`nvidia-smi` works)
