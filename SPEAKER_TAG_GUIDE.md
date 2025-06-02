@@ -102,8 +102,8 @@ Adjust these parameters for better gender matching:
 
 ### 4. Default Voice Mappings
 Built-in voices and their default speakers:
-- alloy, echo, nova, shimmer → S1 (masculine/neutral)
-- fable, onyx → S2 (feminine/varied)
+- aria, atlas, kai, nova → S1 (masculine/neutral)
+- luna, zara → S2 (feminine/varied)
 
 ## Troubleshooting
 
@@ -120,7 +120,7 @@ Built-in voices and their default speakers:
 
 ### Want more control?
 1. Use explicit tags in every request: `"[S2] text [S2]"`
-2. Experiment with base voices (fable vs custom)
+2. Experiment with base voices (luna vs custom)
 3. Try different audio prompt recordings
 
 ## Quick Diagnostic

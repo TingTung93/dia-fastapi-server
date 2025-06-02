@@ -1,10 +1,10 @@
 # CUDA-specific requirements for Dia TTS Server
 # This file is used when CUDA is detected
 
-# PyTorch with CUDA support (CUDA 11.8 - widely compatible)
---index-url https://download.pytorch.org/whl/cu118
-torch==2.5.1+cu118
-torchaudio==2.5.1+cu118
+# PyTorch with CUDA support (CUDA 12.7)
+--index-url https://download.pytorch.org/whl/cu121
+torch>=2.6.0
+torchaudio>=2.6.0
 # torchvision not needed for TTS
 
 # Core dependencies (same as requirements.txt)
@@ -20,7 +20,7 @@ numpy>=1.24.0
 scipy>=1.10.0
 
 # TTS Model
-dia-tts
+nari-tts @ git+https://github.com/nari-labs/dia.git
 
 # Utils
 rich>=13.0.0

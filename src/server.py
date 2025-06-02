@@ -52,15 +52,27 @@ except ImportError:
 from pathlib import Path
 import hashlib
 try:
-    from transformers import WhisperProcessor, WhisperForConditionalGeneration
-    import librosa
+    import whisper
     WHISPER_AVAILABLE = True
 except ImportError:
     WHISPER_AVAILABLE = False
-    WhisperProcessor = None
-    WhisperForConditionalGeneration = None
-    print("⚠️  Whisper transformers not available. Install with: pip install transformers[torch]>=4.30.0")
+    print("⚠️  OpenAI Whisper not available. Install with: pip install openai-whisper")
 
+
+try:
+    import librosa
+    LIBROSA_AVAILABLE = True
+except ImportError:
+    LIBROSA_AVAILABLE = False
+    print("⚠️  Librosa not available. Install with: pip install librosa")
+
+# Audio processing utilities
+try:
+    import soundfile as sf
+    SOUNDFILE_AVAILABLE = True
+except ImportError:
+    SOUNDFILE_AVAILABLE = False
+    print("⚠️  SoundFile not available. Install with: pip install soundfile")
 
 
 # Request/Response Models
@@ -199,6 +211,7 @@ class QueueStats(BaseModel):
     failed_jobs: int
     total_workers: int
     active_workers: int
+    memory_pressure: Dict[str, Any] = {}
 
 
 # Initialize FastAPI app
@@ -245,14 +258,14 @@ else:  # auto
 # Security (optional, accepts any bearer token)
 security = HTTPBearer(auto_error=False)
 
-# Voice mapping (Dia uses speaker tags [S1]/[S2], we'll map common voice names)
+# Voice mapping (Dia uses speaker tags [S1]/[S2], we'll map Dia-specific voice names)
 VOICE_MAPPING: Dict[str, Dict[str, Any]] = {
-    "alloy": {"style": "neutral", "primary_speaker": "S1", "audio_prompt": None, "audio_prompt_transcript": None},
-    "echo": {"style": "calm", "primary_speaker": "S1", "audio_prompt": None, "audio_prompt_transcript": None}, 
-    "fable": {"style": "expressive", "primary_speaker": "S2", "audio_prompt": None, "audio_prompt_transcript": None},
-    "nova": {"style": "friendly", "primary_speaker": "S1", "audio_prompt": None, "audio_prompt_transcript": None},
-    "onyx": {"style": "deep", "primary_speaker": "S2", "audio_prompt": None, "audio_prompt_transcript": None},
-    "shimmer": {"style": "bright", "primary_speaker": "S1", "audio_prompt": None, "audio_prompt_transcript": None},
+    "aria": {"style": "neutral", "primary_speaker": "S1", "audio_prompt": None, "audio_prompt_transcript": None},
+    "atlas": {"style": "calm", "primary_speaker": "S1", "audio_prompt": None, "audio_prompt_transcript": None}, 
+    "luna": {"style": "expressive", "primary_speaker": "S2", "audio_prompt": None, "audio_prompt_transcript": None},
+    "kai": {"style": "friendly", "primary_speaker": "S1", "audio_prompt": None, "audio_prompt_transcript": None},
+    "zara": {"style": "deep", "primary_speaker": "S2", "audio_prompt": None, "audio_prompt_transcript": None},
+    "nova": {"style": "bright", "primary_speaker": "S1", "audio_prompt": None, "audio_prompt_transcript": None},
 }
 
 # Store uploaded audio prompts (now stores file paths)
@@ -291,10 +304,15 @@ DEFAULT_WORKERS = GPU_COUNT if USE_MULTI_GPU else min(4, mp.cpu_count())
 MAX_WORKERS = int(os.getenv("DIA_MAX_WORKERS", DEFAULT_WORKERS))
 ACTIVE_WORKERS: Dict[str, bool] = {}
 
-# GPU assignment for workers (round-robin)
+# GPU assignment for workers (thread-safe round-robin)
 WORKER_GPU_ASSIGNMENT: Dict[int, int] = {}  # Worker ID -> GPU ID
+GPU_ASSIGNMENT_LOCK = threading.Lock()
 NEXT_GPU = 0  # For round-robin assignment
 NEXT_SYNC_GPU = 0  # For synchronous requests
+
+# CUDA optimization settings
+CUDA_STREAMS: Dict[int, torch.cuda.Stream] = {}  # GPU ID -> CUDA Stream
+GPU_MEMORY_THRESHOLD = 0.85  # 85% memory usage threshold
 
 # Thread lock for Rich console displays
 CONSOLE_LOCK = threading.Lock()
@@ -307,56 +325,199 @@ def get_audio_file_hash(filepath: Path) -> str:
         return hashlib.md5(f.read()).hexdigest()
 
 def load_whisper_model():
-    """Load Whisper model if not already loaded"""
+    """Load Whisper model if not already loaded with improved error handling"""
     global WHISPER_MODEL, WHISPER_LOADING
     
-    if not WHISPER_AVAILABLE or not SERVER_CONFIG.auto_transcribe:
+    if not WHISPER_AVAILABLE:
+        if SERVER_CONFIG.debug_mode:
+            console.print("[yellow]⚠️  Whisper not available, skipping model loading[/yellow]")
+        return None
+        
+    if not SERVER_CONFIG.auto_transcribe:
+        if SERVER_CONFIG.debug_mode:
+            console.print("[yellow]⚠️  Auto-transcribe disabled, skipping Whisper loading[/yellow]")
         return None
     
     with WHISPER_LOCK:
-        if WHISPER_MODEL is not None or WHISPER_LOADING:
+        # Return existing model if already loaded
+        if WHISPER_MODEL is not None:
             return WHISPER_MODEL
+            
+        # Skip if already loading
+        if WHISPER_LOADING:
+            if SERVER_CONFIG.debug_mode:
+                console.print("[yellow]🔄 Whisper model already loading...[/yellow]")
+            return None
         
         WHISPER_LOADING = True
         try:
             console.print(f"[yellow]🔄 Loading Whisper model ({SERVER_CONFIG.whisper_model_size})...[/yellow]")
-            WHISPER_MODEL = whisper.load_model(SERVER_CONFIG.whisper_model_size)
-            console.print("[green]✅ Whisper model loaded successfully[/green]")
+            
+            # Validate model size
+            valid_sizes = ["tiny", "base", "small", "medium", "large"]
+            if SERVER_CONFIG.whisper_model_size not in valid_sizes:
+                console.print(f"[red]❌ Invalid Whisper model size: {SERVER_CONFIG.whisper_model_size}[/red]")
+                console.print(f"[yellow]Valid sizes: {', '.join(valid_sizes)}[/yellow]")
+                return None
+            
+            # Load model with device selection
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            WHISPER_MODEL = whisper.load_model(SERVER_CONFIG.whisper_model_size, device=device)
+            
+            console.print(f"[green]✅ Whisper model '{SERVER_CONFIG.whisper_model_size}' loaded successfully on {device}[/green]")
             return WHISPER_MODEL
+            
         except Exception as e:
             console.print(f"[red]❌ Failed to load Whisper model: {e}[/red]")
+            console.print(f"[yellow]Try installing with: pip install openai-whisper[/yellow]")
+            WHISPER_MODEL = None
             return None
         finally:
             WHISPER_LOADING = False
 
+def validate_audio_file(audio_path: Path) -> bool:
+    """Validate audio file compatibility with Whisper"""
+    try:
+        # Check file exists and is readable
+        if not audio_path.exists():
+            console.print(f"[red]❌ Audio file not found: {audio_path}[/red]")
+            return False
+            
+        if not audio_path.is_file():
+            console.print(f"[red]❌ Path is not a file: {audio_path}[/red]")
+            return False
+        
+        # Check file size (Whisper works best with files < 25MB)
+        file_size = audio_path.stat().st_size
+        if file_size > 25 * 1024 * 1024:  # 25MB
+            console.print(f"[yellow]⚠️  Large audio file ({file_size / 1024 / 1024:.1f}MB), transcription may be slow[/yellow]")
+        
+        # Check file extension
+        valid_extensions = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".aac", ".wma"}
+        if audio_path.suffix.lower() not in valid_extensions:
+            console.print(f"[yellow]⚠️  Unsupported audio format: {audio_path.suffix}[/yellow]")
+            console.print(f"[yellow]Supported formats: {', '.join(valid_extensions)}[/yellow]")
+            return False
+        
+        # Try to read audio metadata if soundfile is available
+        if SOUNDFILE_AVAILABLE:
+            try:
+                with sf.SoundFile(audio_path) as f:
+                    duration = len(f) / f.samplerate
+                    if duration < 0.1:
+                        console.print(f"[yellow]⚠️  Very short audio file ({duration:.2f}s)[/yellow]")
+                    elif duration > 300:  # 5 minutes
+                        console.print(f"[yellow]⚠️  Long audio file ({duration:.1f}s), transcription may take time[/yellow]")
+            except Exception:
+                pass  # Ignore soundfile errors, Whisper will handle it
+        
+        return True
+        
+    except Exception as e:
+        console.print(f"[red]❌ Error validating audio file {audio_path}: {e}[/red]")
+        return False
+
 def transcribe_with_whisper(audio_path: Path) -> Optional[str]:
-    """Transcribe audio using Whisper"""
+    """Transcribe audio using Whisper with comprehensive error handling"""
     model = load_whisper_model()
     if not model:
+        if SERVER_CONFIG.debug_mode:
+            console.print(f"[yellow]⚠️  Whisper model not available for transcribing {audio_path.name}[/yellow]")
+        return None
+    
+    # Validate audio file before transcription
+    if not validate_audio_file(audio_path):
         return None
     
     try:
         console.print(f"[yellow]🎤 Transcribing {audio_path.name}...[/yellow]")
-        result = model.transcribe(str(audio_path), language="en")
+        
+        # Convert to absolute path string
+        audio_file_str = str(audio_path.absolute())
+        
+        # Transcribe with optimized settings
+        transcribe_options = {
+            "language": None,  # Auto-detect language
+            "task": "transcribe",
+            "verbose": SERVER_CONFIG.debug_mode,
+            "word_timestamps": False,  # Disable for faster processing
+            "fp16": torch.cuda.is_available(),  # Use FP16 on GPU for speed
+        }
+        
+        if SERVER_CONFIG.debug_mode:
+            console.print(f"[dim]Transcription options: {transcribe_options}[/dim]")
+        
+        result = model.transcribe(audio_file_str, **transcribe_options)
+        
+        if not result or "text" not in result:
+            console.print(f"[red]❌ No transcription result for {audio_path.name}[/red]")
+            return None
+            
         transcript = result["text"].strip()
-        console.print(f"[green]✅ Transcribed: \"{transcript[:50]}...\"[/green]" if len(transcript) > 50 else f"[green]✅ Transcribed: \"{transcript}\"[/green]")
+        
+        if not transcript:
+            console.print(f"[yellow]⚠️  Empty transcription for {audio_path.name}[/yellow]")
+            return None
+        
+        # Log additional info if available
+        if "language" in result and result["language"]:
+            detected_lang = result["language"]
+            console.print(f"[dim]Detected language: {detected_lang}[/dim]")
+        
+        if "no_speech_prob" in result:
+            no_speech_prob = result["no_speech_prob"]
+            if no_speech_prob > 0.6:
+                console.print(f"[yellow]⚠️  High probability of no speech ({no_speech_prob:.2f})[/yellow]")
+        
+        # Clean up transcript
+        transcript = transcript.strip()
+        # Remove common transcription artifacts
+        transcript = transcript.replace("  ", " ")  # Multiple spaces
+        transcript = transcript.replace(" .", ".")   # Space before period
+        
+        display_text = transcript[:60] + "..." if len(transcript) > 60 else transcript
+        console.print(f"[green]✅ Transcribed: \"{display_text}\"[/green]")
+        
+        if SERVER_CONFIG.debug_mode:
+            console.print(f"[dim]Full transcript: {transcript}[/dim]")
+        
         return transcript
+        
     except Exception as e:
-        console.print(f"[red]❌ Transcription failed: {e}[/red]")
+        error_msg = str(e)
+        console.print(f"[red]❌ Transcription failed for {audio_path.name}: {error_msg}[/red]")
+        
+        # Provide helpful error messages
+        if "CUDA" in error_msg:
+            console.print(f"[yellow]Try running with CPU: set device='cpu' in Whisper load_model()[/yellow]")
+        elif "out of memory" in error_msg.lower():
+            console.print(f"[yellow]Try using a smaller Whisper model (e.g., 'tiny' or 'base')[/yellow]")
+        elif "No such file" in error_msg:
+            console.print(f"[yellow]Check that the audio file exists and is accessible[/yellow]")
+        
         return None
 
 def discover_audio_prompts(force_retranscribe: bool = False) -> Dict[str, AudioPromptInfo]:
-    """Automatically discover audio prompts and their transcripts"""
+    """Automatically discover audio prompts and their transcripts with enhanced Whisper integration"""
     global AUDIO_PROMPTS, AUDIO_PROMPT_METADATA
     
     audio_prompt_dir = Path(AUDIO_PROMPT_DIR)
     if not audio_prompt_dir.exists():
+        console.print(f"[yellow]⚠️  Audio prompt directory not found: {audio_prompt_dir}[/yellow]")
+        console.print(f"[yellow]Create the directory and add audio files to enable voice cloning[/yellow]")
         return {}
     
     discovered = {}
-    audio_extensions = {'.wav', '.mp3', '.flac', '.ogg', '.m4a'}
+    # Expanded audio extensions for better compatibility
+    audio_extensions = {'.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac', '.wma', '.mp4'}
     
     console.print("[cyan]🔍 Discovering audio prompts...[/cyan]")
+    
+    # Check Whisper availability for transcription
+    whisper_ready = WHISPER_AVAILABLE and SERVER_CONFIG.auto_transcribe
+    if force_retranscribe and not whisper_ready:
+        console.print("[yellow]⚠️  Force retranscribe requested but Whisper not available[/yellow]")
+        force_retranscribe = False
     
     for audio_file in audio_prompt_dir.iterdir():
         if audio_file.suffix.lower() not in audio_extensions:
@@ -409,19 +570,29 @@ def discover_audio_prompts(force_retranscribe: bool = False) -> Dict[str, AudioP
             transcript_source = existing_metadata.transcript_source
         
         # 4. Use Whisper if no transcript found or forced
-        if (not transcript or force_retranscribe) and SERVER_CONFIG.auto_transcribe:
+        if (not transcript or force_retranscribe) and whisper_ready:
+            console.print(f"[cyan]Attempting Whisper transcription for {audio_file.name}...[/cyan]")
             whisper_transcript = transcribe_with_whisper(audio_file)
             if whisper_transcript:
                 transcript = whisper_transcript
                 transcript_source = "whisper"
                 
-                # Save Whisper transcript
+                # Save Whisper transcript with backup of existing
                 transcript_file = audio_file.with_suffix('.txt')
                 try:
+                    # Backup existing transcript if it exists
+                    if transcript_file.exists():
+                        backup_file = audio_file.with_suffix('.txt.backup')
+                        transcript_file.rename(backup_file)
+                        console.print(f"[dim]Backed up existing transcript to {backup_file.name}[/dim]")
+                    
                     transcript_file.write_text(transcript, encoding='utf-8')
-                    console.print(f"[green]💾 Saved transcript to {transcript_file.name}[/green]")
+                    console.print(f"[green]💾 Saved Whisper transcript to {transcript_file.name}[/green]")
                 except Exception as e:
                     console.print(f"[yellow]⚠️  Could not save transcript: {e}[/yellow]")
+            else:
+                if SERVER_CONFIG.debug_mode:
+                    console.print(f"[yellow]Whisper transcription failed for {audio_file.name}[/yellow]")
         
         # Create metadata
         prompt_info = AudioPromptInfo(
@@ -440,13 +611,18 @@ def discover_audio_prompts(force_retranscribe: bool = False) -> Dict[str, AudioP
         AUDIO_PROMPT_METADATA[prompt_id] = prompt_info
         discovered[prompt_id] = prompt_info
         
-        # Log discovery
+        # Log discovery with enhanced information
         console.print(f"[green]✅ {prompt_id}[/green]")
+        console.print(f"   [dim]Duration: {duration:.1f}s, Sample rate: {sr}Hz[/dim]")
         if transcript:
             preview = transcript[:60] + "..." if len(transcript) > 60 else transcript
             console.print(f"   [dim]Transcript ({transcript_source}): {preview}[/dim]")
         else:
-            console.print(f"   [yellow]⚠️  No transcript[/yellow]")
+            console.print(f"   [yellow]⚠️  No transcript available[/yellow]")
+            if whisper_ready:
+                console.print(f"   [dim]Tip: Whisper auto-transcription is enabled but may have failed[/dim]")
+            else:
+                console.print(f"   [dim]Tip: Create a {prompt_id}.txt file with the transcript[/dim]")
         
         # Update voice mappings with discovered transcript
         for voice_id, voice_config in VOICE_MAPPING.items():
@@ -455,7 +631,19 @@ def discover_audio_prompts(force_retranscribe: bool = False) -> Dict[str, AudioP
                     voice_config["audio_prompt_transcript"] = transcript
                     console.print(f"   [dim]Updated voice '{voice_id}' transcript[/dim]")
     
-    console.print(f"[bold green]✅ Discovered {len(discovered)} audio prompts[/bold green]")
+    # Summary with helpful information
+    total_discovered = len(discovered)
+    with_transcripts = len([p for p in discovered.values() if p.transcript])
+    
+    console.print(f"[bold green]✅ Discovered {total_discovered} audio prompts[/bold green]")
+    console.print(f"[green]   • {with_transcripts} with transcripts[/green]")
+    console.print(f"[green]   • {total_discovered - with_transcripts} without transcripts[/green]")
+    
+    if whisper_ready and (total_discovered - with_transcripts) > 0:
+        console.print(f"[yellow]   • Missing transcripts will be generated by Whisper automatically[/yellow]")
+    elif not whisper_ready and (total_discovered - with_transcripts) > 0:
+        console.print(f"[yellow]   • Install Whisper for automatic transcription: pip install openai-whisper[/yellow]")
+    
     return discovered
 
 def sync_audio_prompts_with_voices():
@@ -499,26 +687,58 @@ def load_model():
         load_single_model()
 
 
+def check_gpu_memory(gpu_id: int, required_gb: float = 3.5) -> bool:
+    """Check if GPU has sufficient memory available"""
+    try:
+        with torch.cuda.device(gpu_id):
+            total_memory = torch.cuda.get_device_properties(gpu_id).total_memory
+            allocated_memory = torch.cuda.memory_allocated(gpu_id)
+            available_memory = (total_memory - allocated_memory) / 1024**3  # Convert to GB
+            return available_memory >= required_gb
+    except Exception:
+        return False
+
+def get_optimal_precision(gpu_id: int) -> str:
+    """Get optimal precision for specific GPU"""
+    try:
+        with torch.cuda.device(gpu_id):
+            if torch.cuda.is_bf16_supported():
+                return "bfloat16"
+            else:
+                return "float16"
+    except Exception:
+        return "float32"
+
 def load_single_model():
     """Load a single model instance (single GPU or CPU mode)"""
     global model
     
     try:
         # Determine device
-        if torch.cuda.is_available():
-            # Use first allowed GPU if specified
-            if ALLOWED_GPUS:
-                device = torch.device(f"cuda:{ALLOWED_GPUS[0]}")
-                console.print(f"[yellow]Using GPU {ALLOWED_GPUS[0]} for single model mode[/yellow]")
-            else:
-                device = torch.device("cuda")
-            # Use bfloat16 if available (faster based on benchmarks), fall back to float16
-            if torch.cuda.is_bf16_supported():
-                compute_dtype = "bfloat16"
-                console.print("[green]Using BFloat16 precision for better performance[/green]")
-            else:
-                compute_dtype = "float16"
-                console.print("[yellow]BFloat16 not supported, using Float16[/yellow]")
+        if torch.cuda.is_available() and ALLOWED_GPUS:
+            gpu_id = ALLOWED_GPUS[0]
+            
+            # Check GPU memory availability
+            if not check_gpu_memory(gpu_id, required_gb=3.5):
+                console.print(f"[red]❌ Insufficient GPU memory on GPU {gpu_id}[/red]")
+                raise RuntimeError(f"GPU {gpu_id} has insufficient memory for model loading")
+            
+            device = torch.device(f"cuda:{gpu_id}")
+            console.print(f"[yellow]Using GPU {gpu_id} for single model mode[/yellow]")
+            
+            # Get optimal precision for this specific GPU
+            compute_dtype = get_optimal_precision(gpu_id)
+            console.print(f"[green]Using {compute_dtype} precision[/green]")
+            
+            # Initialize CUDA stream for this GPU
+            CUDA_STREAMS[gpu_id] = torch.cuda.Stream(device=device)
+            
+        elif torch.cuda.is_available():
+            device = torch.device("cuda")
+            gpu_id = 0
+            compute_dtype = get_optimal_precision(gpu_id)
+            CUDA_STREAMS[gpu_id] = torch.cuda.Stream(device=device)
+            
         elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
             device = torch.device("mps") 
             compute_dtype = "float16"
@@ -541,11 +761,23 @@ def load_single_model():
                 # Simulate progress during download
                 progress.update(task, advance=30)
                 
-                model = Dia.from_pretrained(
-                    "nari-labs/Dia-1.6B", 
-                    compute_dtype=compute_dtype,
-                    device=device
-                )
+                # Load model with proper device context
+                if device.type == "cuda":
+                    with torch.cuda.device(device):
+                        model = Dia.from_pretrained(
+                            "nari-labs/Dia-1.6B", 
+                            compute_dtype=compute_dtype,
+                            device=device
+                        )
+                        # Ensure model is actually on the correct device
+                        if hasattr(model, 'to'):
+                            model = model.to(device)
+                else:
+                    model = Dia.from_pretrained(
+                        "nari-labs/Dia-1.6B", 
+                        compute_dtype=compute_dtype,
+                        device=device
+                    )
                 
                 progress.update(task, completed=100)
         
@@ -556,9 +788,29 @@ def load_single_model():
         raise RuntimeError(f"Failed to load Dia model: {e}")
 
 
+def cleanup_gpu_memory(gpu_id: int):
+    """Clean up GPU memory for specific device"""
+    try:
+        with torch.cuda.device(gpu_id):
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+    except Exception as e:
+        console.print(f"[yellow]⚠️ Warning: Failed to cleanup GPU {gpu_id} memory: {e}[/yellow]")
+
 def load_multi_gpu_models():
-    """Load one model instance per GPU"""
+    """Load one model instance per GPU with improved error handling"""
     global GPU_MODELS
+    
+    # Pre-check all GPUs for memory availability
+    valid_gpus = []
+    for gpu_id in ALLOWED_GPUS:
+        if check_gpu_memory(gpu_id, required_gb=3.5):
+            valid_gpus.append(gpu_id)
+        else:
+            console.print(f"[red]❌ GPU {gpu_id} has insufficient memory, skipping[/red]")
+    
+    if not valid_gpus:
+        raise RuntimeError("No GPUs have sufficient memory for model loading")
     
     with CONSOLE_LOCK:
         with Progress(
@@ -569,37 +821,52 @@ def load_multi_gpu_models():
             console=console
         ) as progress:
             main_task = progress.add_task(
-                f"[cyan]Loading models on {len(ALLOWED_GPUS)} GPUs...[/cyan]", 
-                total=len(ALLOWED_GPUS)
+                f"[cyan]Loading models on {len(valid_gpus)} GPUs...[/cyan]", 
+                total=len(valid_gpus)
             )
             
-            for gpu_id in ALLOWED_GPUS:
+            loaded_models = {}
+            for gpu_id in valid_gpus:
                 try:
                     device = torch.device(f"cuda:{gpu_id}")
                     
-                    # Check compute capability for this specific GPU
-                    with torch.cuda.device(gpu_id):
-                        if torch.cuda.is_bf16_supported():
-                            compute_dtype = "bfloat16"
-                            console.print(f"[green]GPU {gpu_id}: Using BFloat16 precision[/green]")
-                        else:
-                            compute_dtype = "float16"
-                            console.print(f"[yellow]GPU {gpu_id}: Using Float16 precision[/yellow]")
+                    # Get optimal precision for this GPU
+                    compute_dtype = get_optimal_precision(gpu_id)
+                    console.print(f"[green]GPU {gpu_id}: Using {compute_dtype} precision[/green]")
                     
                     console.print(f"[cyan]Loading model on GPU {gpu_id}...[/cyan]")
                     
-                    GPU_MODELS[gpu_id] = Dia.from_pretrained(
-                        "nari-labs/Dia-1.6B",
-                        compute_dtype=compute_dtype,
-                        device=device
-                    )
+                    # Load model with proper device context
+                    with torch.cuda.device(gpu_id):
+                        model_instance = Dia.from_pretrained(
+                            "nari-labs/Dia-1.6B",
+                            compute_dtype=compute_dtype,
+                            device=device
+                        )
+                        
+                        # Ensure model is on correct device
+                        if hasattr(model_instance, 'to'):
+                            model_instance = model_instance.to(device)
+                        
+                        # Initialize CUDA stream for this GPU
+                        CUDA_STREAMS[gpu_id] = torch.cuda.Stream(device=device)
+                        
+                        loaded_models[gpu_id] = model_instance
                     
                     console.print(f"[green]✓ Model loaded successfully on GPU {gpu_id}[/green]")
                     progress.advance(main_task)
                     
                 except Exception as e:
                     console.print(f"[red]✗ Error loading model on GPU {gpu_id}: {e}[/red]")
+                    # Cleanup any partially loaded models
+                    cleanup_gpu_memory(gpu_id)
                     # Continue loading on other GPUs
+            
+            # Only update global GPU_MODELS if we successfully loaded at least one
+            if loaded_models:
+                GPU_MODELS.update(loaded_models)
+            else:
+                raise RuntimeError("Failed to load models on any GPU")
     
     if not GPU_MODELS:
         raise RuntimeError("Failed to load model on any GPU")
@@ -648,32 +915,46 @@ def preprocess_text(text: str, voice_id: str, role: Optional[str] = None) -> str
     return text
 
 
-def can_use_torch_compile() -> bool:
-    """Check if torch.compile can be used safely"""
+# Cache for torch.compile capability per GPU
+TORCH_COMPILE_CACHE: Dict[int, bool] = {}
+
+def can_use_torch_compile(gpu_id: int = 0) -> bool:
+    """Check if torch.compile can be used safely on specific GPU"""
     # Check if disabled via environment variable
     if os.getenv("DIA_DISABLE_TORCH_COMPILE", "").lower() in ("1", "true", "yes"):
         return False
     
+    # Check cache first
+    if gpu_id in TORCH_COMPILE_CACHE:
+        return TORCH_COMPILE_CACHE[gpu_id]
+    
     try:
         # Only try torch.compile on CUDA with proper compiler setup
         if not torch.cuda.is_available():
+            TORCH_COMPILE_CACHE[gpu_id] = False
             return False
         
         # Check if we're on Windows and don't have proper compiler
         import platform
         if platform.system() == "Windows":
             # On Windows, torch.compile often fails without proper MSVC setup
+            TORCH_COMPILE_CACHE[gpu_id] = False
             return False
         
-        # Try a simple compilation test
-        @torch.compile
-        def test_fn(x):
-            return x + 1
-        
-        test_tensor = torch.tensor([1.0])
-        test_fn(test_tensor)
+        # Try a simple compilation test on the specific GPU
+        with torch.cuda.device(gpu_id):
+            @torch.compile
+            def test_fn(x):
+                return x + 1
+            
+            test_tensor = torch.tensor([1.0], device=f"cuda:{gpu_id}")
+            test_fn(test_tensor)
+            torch.cuda.synchronize(gpu_id)
+            
+        TORCH_COMPILE_CACHE[gpu_id] = True
         return True
     except Exception:
+        TORCH_COMPILE_CACHE[gpu_id] = False
         return False
 
 
@@ -791,14 +1072,26 @@ def process_tts_job(job_id: str) -> None:
 
 
 def get_model_for_worker(worker_id: int = 0):
-    """Get the appropriate model instance for a worker"""
+    """Get the appropriate model instance for a worker with thread-safe GPU assignment"""
     if USE_MULTI_GPU and GPU_MODELS:
-        # Assign worker to GPU in round-robin fashion
-        gpu_idx = worker_id % len(ALLOWED_GPUS)
-        gpu_id = ALLOWED_GPUS[gpu_idx]
-        return GPU_MODELS.get(gpu_id), gpu_id
+        # Thread-safe GPU assignment
+        with GPU_ASSIGNMENT_LOCK:
+            available_gpus = list(GPU_MODELS.keys())
+            if not available_gpus:
+                raise RuntimeError("No GPU models available")
+            
+            gpu_idx = worker_id % len(available_gpus)
+            gpu_id = available_gpus[gpu_idx]
+            
+            model_instance = GPU_MODELS.get(gpu_id)
+            if model_instance is None:
+                raise RuntimeError(f"Model not found for GPU {gpu_id}")
+            
+            return model_instance, gpu_id
     else:
         # Single model mode
+        if model is None:
+            raise RuntimeError("Single model not loaded")
         return model, 0
 
 
@@ -846,26 +1139,59 @@ def generate_audio_from_text(
     processed_text = preprocess_text(text, voice_id, role)
     
     # Get voice configuration
-    voice_config = VOICE_MAPPING.get(voice_id, VOICE_MAPPING["alloy"])
+    voice_config = VOICE_MAPPING.get(voice_id, VOICE_MAPPING["aria"])
     
-    # Add audio prompt transcript if available (for better voice cloning)
-    if voice_config.get("audio_prompt_transcript") and voice_config.get("audio_prompt"):
-        # Prepend the transcript for better voice cloning results
-        processed_text = voice_config["audio_prompt_transcript"] + " " + processed_text
-    
-    # Get audio prompt if available
+    # Get audio prompt if available with improved validation
     audio_prompt = None
     audio_prompt_used = False
+    audio_prompt_transcript = None
+    
     if voice_config.get("audio_prompt"):
-        audio_prompt_path = AUDIO_PROMPTS.get(voice_config["audio_prompt"])
-        if audio_prompt_path and os.path.exists(audio_prompt_path):
-            # Model expects file path for audio prompt
-            audio_prompt = audio_prompt_path
-            audio_prompt_used = True
+        audio_prompt_id = voice_config["audio_prompt"]
+        
+        if audio_prompt_id in AUDIO_PROMPTS:
+            audio_prompt_path = AUDIO_PROMPTS[audio_prompt_id]
+            
+            # Convert to absolute path for consistency
+            if not os.path.isabs(audio_prompt_path):
+                audio_prompt_path = os.path.abspath(audio_prompt_path)
+            
+            if os.path.exists(audio_prompt_path) and os.path.isfile(audio_prompt_path):
+                # Validate audio file accessibility
+                try:
+                    # Quick validation that file can be read
+                    with open(audio_prompt_path, 'rb') as f:
+                        f.read(1024)  # Read first KB to validate
+                    
+                    audio_prompt = audio_prompt_path
+                    audio_prompt_used = True
+                    
+                    # Get transcript if available
+                    audio_prompt_transcript = voice_config.get("audio_prompt_transcript")
+                    
+                    if SERVER_CONFIG.debug_mode:
+                        console.print(f"[green]✓ Using audio prompt: {os.path.basename(audio_prompt_path)}[/green]")
+                        if audio_prompt_transcript:
+                            preview = audio_prompt_transcript[:30] + "..." if len(audio_prompt_transcript) > 30 else audio_prompt_transcript
+                            console.print(f"[dim]Transcript: {preview}[/dim]")
+                            
+                except Exception as e:
+                    console.print(f"[red]❌ Audio prompt file corrupted or unreadable: {audio_prompt_path}[/red]")
+                    console.print(f"[red]Error: {e}[/red]")
+                    audio_prompt_used = False
+            else:
+                console.print(f"[yellow]⚠️ Audio prompt file not found: {audio_prompt_path}[/yellow]")
+                audio_prompt_used = False
         else:
-            if audio_prompt_path:
-                print(f"Warning: Audio prompt file not found: {audio_prompt_path}")
+            console.print(f"[yellow]⚠️ Audio prompt ID '{audio_prompt_id}' not registered[/yellow]")
             audio_prompt_used = False
+    
+    # Add audio prompt transcript to processed text for better voice cloning
+    if audio_prompt_transcript and audio_prompt_used:
+        # Prepend the transcript for better voice cloning results
+        processed_text = audio_prompt_transcript + " " + processed_text
+        if SERVER_CONFIG.debug_mode:
+            console.print(f"[dim]Enhanced text with transcript: {processed_text[:100]}...[/dim]")
     
     # Set default parameters
     generation_params = {
@@ -873,7 +1199,7 @@ def generate_audio_from_text(
         "cfg_scale": cfg_scale or 3.0,
         "top_p": top_p or 0.95,
         "max_tokens": max_tokens,
-        "use_torch_compile": use_torch_compile if use_torch_compile is not None else can_use_torch_compile(),
+        "use_torch_compile": use_torch_compile if use_torch_compile is not None else can_use_torch_compile(gpu_id),
         "verbose": SERVER_CONFIG.debug_mode
     }
     
@@ -904,8 +1230,15 @@ def generate_audio_from_text(
     
     # Generate audio
     try:
-        # Generate with proper audio prompt handling
+        # Generate with proper CUDA context and audio prompt handling
         generation_start = time.time()
+        
+        # Ensure we're on the correct CUDA device
+        if model_instance and hasattr(model_instance, 'device') and str(model_instance.device).startswith('cuda'):
+            current_device = torch.cuda.current_device()
+            model_device = int(str(model_instance.device).split(':')[1]) if ':' in str(model_instance.device) else 0
+            if current_device != model_device:
+                torch.cuda.set_device(model_device)
         
         # Only show progress in debug mode or if there's only one worker
         show_progress = SERVER_CONFIG.debug_mode or MAX_WORKERS == 1
@@ -947,11 +1280,21 @@ def generate_audio_from_text(
                             # Set verbose=True to get token speed info from model
                             generation_params['verbose'] = SERVER_CONFIG.debug_mode
                             
-                            audio_output = model_instance.generate(
-                                processed_text,
-                                audio_prompt=audio_prompt,  # Dia will handle the batching internally
-                                **generation_params
-                            )
+                            # Use CUDA stream for async execution if available
+                            if gpu_id in CUDA_STREAMS:
+                                with torch.cuda.stream(CUDA_STREAMS[gpu_id]):
+                                    audio_output = model_instance.generate(
+                                        processed_text,
+                                        audio_prompt=audio_prompt,
+                                        **generation_params
+                                    )
+                                    torch.cuda.synchronize(gpu_id)
+                            else:
+                                audio_output = model_instance.generate(
+                                    processed_text,
+                                    audio_prompt=audio_prompt,
+                                    **generation_params
+                                )
                             
                             # Stop progress thread
                             stop_progress.set()
@@ -968,19 +1311,41 @@ def generate_audio_from_text(
                 
                 # Still generate audio without progress display
                 generation_params['verbose'] = SERVER_CONFIG.debug_mode
+                
+                # Use CUDA stream for async execution if available
+                if gpu_id in CUDA_STREAMS:
+                    with torch.cuda.stream(CUDA_STREAMS[gpu_id]):
+                        audio_output = model_instance.generate(
+                            processed_text,
+                            audio_prompt=audio_prompt,
+                            **generation_params
+                        )
+                        torch.cuda.synchronize(gpu_id)
+                else:
+                    audio_output = model_instance.generate(
+                        processed_text,
+                        audio_prompt=audio_prompt,
+                        **generation_params
+                    )
+        else:
+            # No progress display for concurrent workers
+            generation_params['verbose'] = SERVER_CONFIG.debug_mode
+            
+            # Use CUDA stream for async execution if available
+            if gpu_id in CUDA_STREAMS:
+                with torch.cuda.stream(CUDA_STREAMS[gpu_id]):
+                    audio_output = model_instance.generate(
+                        processed_text,
+                        audio_prompt=audio_prompt,
+                        **generation_params
+                    )
+                    torch.cuda.synchronize(gpu_id)
+            else:
                 audio_output = model_instance.generate(
                     processed_text,
                     audio_prompt=audio_prompt,
                     **generation_params
                 )
-        else:
-            # No progress display for concurrent workers
-            generation_params['verbose'] = SERVER_CONFIG.debug_mode
-            audio_output = model_instance.generate(
-                processed_text,
-                audio_prompt=audio_prompt,
-                **generation_params
-            )
         
         # Apply speed adjustment if needed
         if speed != 1.0 and audio_output is not None:
@@ -993,6 +1358,18 @@ def generate_audio_from_text(
                 audio_output = np.interp(x_resampled, x_original, audio_output)
         
         generation_time = time.time() - start_time
+        
+        # Clean up GPU memory if we're running close to capacity
+        if gpu_id in CUDA_STREAMS and torch.cuda.is_available():
+            try:
+                memory_allocated = torch.cuda.memory_allocated(gpu_id) / torch.cuda.get_device_properties(gpu_id).total_memory
+                if memory_allocated > GPU_MEMORY_THRESHOLD:
+                    cleanup_gpu_memory(gpu_id)
+                    if SERVER_CONFIG.debug_mode:
+                        console.print(f"[yellow]Cleaned up GPU {gpu_id} memory (was {memory_allocated:.1%} full)[/yellow]")
+            except Exception as e:
+                if SERVER_CONFIG.debug_mode:
+                    console.print(f"[yellow]Memory monitoring failed for GPU {gpu_id}: {e}[/yellow]")
         
         # Calculate performance metrics
         if audio_output is not None and (SERVER_CONFIG.debug_mode or SERVER_CONFIG.show_prompts):
@@ -1058,11 +1435,21 @@ def generate_audio_from_text(
                 retry_params = generation_params.copy()
                 retry_params["use_torch_compile"] = False
                 
-                audio_output = model.generate(
-                    processed_text,
-                    audio_prompt=audio_prompt,
-                    **retry_params
-                )
+                # Use CUDA stream for retry if available
+                if gpu_id in CUDA_STREAMS:
+                    with torch.cuda.stream(CUDA_STREAMS[gpu_id]):
+                        audio_output = model.generate(
+                            processed_text,
+                            audio_prompt=audio_prompt,
+                            **retry_params
+                        )
+                        torch.cuda.synchronize(gpu_id)
+                else:
+                    audio_output = model.generate(
+                        processed_text,
+                        audio_prompt=audio_prompt,
+                        **retry_params
+                    )
                 
                 # Apply speed adjustment if needed
                 if speed != 1.0 and audio_output is not None:
@@ -1180,15 +1567,54 @@ def cleanup_old_jobs():
         JOB_RESULTS.pop(job_id, None)
         if SERVER_CONFIG.debug_mode:
             print(f"Cleaned up old job: {job_id}")
+    
+    # Also trigger GPU memory cleanup if needed
+    if torch.cuda.is_available():
+        for gpu_id in CUDA_STREAMS.keys():
+            try:
+                memory_allocated = torch.cuda.memory_allocated(gpu_id) / torch.cuda.get_device_properties(gpu_id).total_memory
+                if memory_allocated > GPU_MEMORY_THRESHOLD:
+                    cleanup_gpu_memory(gpu_id)
+            except Exception:
+                pass  # Ignore memory monitoring errors during cleanup
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup on shutdown"""
-    global WORKER_POOL
+    global WORKER_POOL, GPU_MODELS, model, CUDA_STREAMS
+    
+    # Shutdown worker pool
     if WORKER_POOL:
         WORKER_POOL.shutdown(wait=True)
         print("Worker pool shut down")
+    
+    # Clean up GPU resources
+    if torch.cuda.is_available():
+        try:
+            # Clean up CUDA streams
+            for gpu_id, stream in CUDA_STREAMS.items():
+                stream.synchronize()
+            CUDA_STREAMS.clear()
+            
+            # Clean up models and free GPU memory
+            if GPU_MODELS:
+                for gpu_id, model_instance in GPU_MODELS.items():
+                    del model_instance
+                    cleanup_gpu_memory(gpu_id)
+                GPU_MODELS.clear()
+            
+            if model is not None:
+                del model
+                model = None
+                
+            # Final GPU memory cleanup
+            for gpu_id in range(torch.cuda.device_count()):
+                cleanup_gpu_memory(gpu_id)
+                
+            print("GPU resources cleaned up")
+        except Exception as e:
+            print(f"Warning: GPU cleanup failed: {e}")
 
 
 @app.get("/")
@@ -1273,11 +1699,13 @@ async def generate_speech(
     else:
         # Sync mode: traditional immediate response
         try:
-            # Get next GPU for sync request (round-robin)
+            # Get next GPU for sync request (thread-safe round-robin)
             global NEXT_SYNC_GPU
-            sync_worker_id = NEXT_SYNC_GPU
-            if USE_MULTI_GPU:
-                NEXT_SYNC_GPU = (NEXT_SYNC_GPU + 1) % len(ALLOWED_GPUS)
+            with GPU_ASSIGNMENT_LOCK:
+                sync_worker_id = NEXT_SYNC_GPU
+                if USE_MULTI_GPU and GPU_MODELS:
+                    available_gpus = list(GPU_MODELS.keys())
+                    NEXT_SYNC_GPU = (NEXT_SYNC_GPU + 1) % len(available_gpus)
             
             # Generate audio
             audio_data, log_id = generate_audio_from_text(
@@ -1443,7 +1871,7 @@ async def create_voice_mapping(mapping: VoiceMappingUpdate):
 @app.delete("/voice_mappings/{voice_id}")
 async def delete_voice_mapping(voice_id: str):
     """Delete voice mapping (only custom voices, not defaults)"""
-    default_voices = {"alloy", "echo", "fable", "nova", "onyx", "shimmer"}
+    default_voices = {"aria", "atlas", "luna", "kai", "zara", "nova"}
     
     if voice_id in default_voices:
         raise HTTPException(status_code=400, detail=f"Cannot delete default voice '{voice_id}'")
@@ -1821,13 +2249,30 @@ async def cancel_job(job_id: str):
 @app.get("/queue/stats")
 async def get_queue_stats():
     """Get queue statistics"""
+    # Add real-time memory pressure monitoring
+    memory_pressure = {}
+    if torch.cuda.is_available():
+        for gpu_id in ALLOWED_GPUS:
+            try:
+                total_memory = torch.cuda.get_device_properties(gpu_id).total_memory
+                allocated_memory = torch.cuda.memory_allocated(gpu_id)
+                pressure = allocated_memory / total_memory
+                
+                memory_pressure[f"gpu_{gpu_id}"] = {
+                    "pressure": round(pressure, 3),
+                    "status": "high" if pressure > GPU_MEMORY_THRESHOLD else "normal"
+                }
+            except Exception:
+                memory_pressure[f"gpu_{gpu_id}"] = {"status": "unknown"}
+    
     stats = {
         "pending_jobs": len([j for j in JOB_QUEUE.values() if j.status == JobStatus.PENDING]),
         "processing_jobs": len([j for j in JOB_QUEUE.values() if j.status == JobStatus.PROCESSING]),
         "completed_jobs": len([j for j in JOB_QUEUE.values() if j.status == JobStatus.COMPLETED]),
         "failed_jobs": len([j for j in JOB_QUEUE.values() if j.status == JobStatus.FAILED]),
         "total_workers": MAX_WORKERS,
-        "active_workers": len([w for w in ACTIVE_WORKERS.values() if w])
+        "active_workers": len([w for w in ACTIVE_WORKERS.values() if w]),
+        "memory_pressure": memory_pressure
     }
     
     return QueueStats(**stats)
@@ -2016,6 +2461,27 @@ async def load_whisper():
     else:
         raise HTTPException(status_code=500, detail="Failed to load Whisper model")
 
+@app.post("/v1/audio/speech")
+async def create_speech_v1(
+    model: str = "dia",
+    input: str = "",
+    voice: str = "aria",
+    response_format: str = "wav",
+    speed: float = 1.0
+):
+    """SillyTavern-compatible TTS endpoint"""
+    # Convert SillyTavern format to internal format
+    tts_request = TTSRequest(
+        text=input,
+        voice_id=voice,
+        response_format=response_format,
+        speed=speed
+    )
+    
+    # Use sync generation for compatibility
+    return await generate_speech(tts_request, async_mode=False)
+
+
 
 if __name__ == "__main__":
     import argparse
@@ -2050,7 +2516,7 @@ if __name__ == "__main__":
     print(f"Retention: {SERVER_CONFIG.output_retention_hours} hours")
     
     uvicorn.run(
-        "src.server:app",
+        app,
         host=args.host,
         port=args.port,
         reload=args.reload

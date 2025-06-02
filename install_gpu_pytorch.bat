@@ -9,7 +9,7 @@ echo   CUDA: Installed
 echo.
 
 echo Current PyTorch: CPU-only version
-echo Installing: GPU version with CUDA 11.8
+echo Installing: GPU version with CUDA 12.1
 echo.
 
 echo Step 1: Uninstalling CPU version...
@@ -17,7 +17,7 @@ pip uninstall torch torchaudio torchvision -y
 
 echo.
 echo Step 2: Installing GPU version...
-pip install torch==2.5.1+cu118 torchaudio==2.5.1+cu118 --index-url https://download.pytorch.org/whl/cu118
+pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
 
 echo.
 echo Step 3: Testing installation...
@@ -25,6 +25,6 @@ python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA av
 
 echo.
 echo ✅ Done! Now restart your terminal and run:
-echo    python start_simple.py
+echo    python start_server.py
 echo.
 pause

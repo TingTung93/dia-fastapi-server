@@ -11,7 +11,7 @@ A high-performance FastAPI server for the Dia text-to-speech model with multi-GP
 - 🎛️ **Flexible Configuration** - Full control over model parameters
 - 📝 **Comprehensive Logging** - Debug mode with detailed performance tracking
 - 🐳 **Docker Ready** - Easy deployment with Docker support
-- 🎮 **SillyTavern Compatible** - Drop-in replacement for OpenAI TTS API
+- 🎮 **SillyTavern Compatible** - Compatible TTS API for voice generation
 
 ## Quick Start
 
@@ -122,7 +122,7 @@ python start_server.py --gpu-mode single
 ```bash
 curl -X POST "http://localhost:7860/generate" \
   -H "Content-Type: application/json" \
-  -d '{"text": "Hello, world!", "voice_id": "alloy"}' \
+  -d '{"text": "Hello, world!", "voice_id": "aria"}' \
   --output speech.wav
 ```
 
@@ -131,7 +131,7 @@ curl -X POST "http://localhost:7860/generate" \
 # Submit job
 curl -X POST "http://localhost:7860/generate?async_mode=true" \
   -H "Content-Type: application/json" \
-  -d '{"text": "Hello, world!", "voice_id": "alloy"}'
+  -d '{"text": "Hello, world!", "voice_id": "aria"}'
 
 # Check job status
 curl "http://localhost:7860/jobs/{job_id}"
@@ -215,13 +215,13 @@ python start_server.py
 
 2. In SillyTavern:
    - Navigate to Settings → Text-to-Speech
-   - Set TTS Provider: **OpenAI Compatible**
+   - Set TTS Provider: **Custom API**
    - Model: **dia**
-   - API Key: **sk-anything** (any value works)
+   - API Key: **dia-server** (any value works)
    - Endpoint URL: **http://localhost:7860/v1/audio/speech**
 
 3. Select a voice:
-   - Choose from: alloy, echo, fable, nova, onyx, shimmer
+   - Choose from: aria, atlas, luna, kai, zara, nova
    - Or use your custom uploaded voices
 
 ## Performance Metrics
