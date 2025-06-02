@@ -78,7 +78,7 @@ except ImportError:
 # Request/Response Models
 class TTSRequest(BaseModel):
     text: str = Field(..., max_length=4096, description="Text to convert to speech")
-    voice_id: str = Field(default="alloy", description="Voice identifier")
+    voice_id: str = Field(..., description="Voice identifier (required - no default voices)")
     response_format: str = Field(default="wav", description="Audio format (wav, mp3)")
     speed: float = Field(default=1.0, ge=0.25, le=4.0, description="Speech speed")
     role: Optional[str] = Field(default=None, description="Role of the speaker (user, assistant, system)")
@@ -89,6 +89,7 @@ class TTSRequest(BaseModel):
     top_p: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Top-p sampling")
     max_tokens: Optional[int] = Field(default=None, ge=100, le=10000, description="Maximum tokens to generate")
     use_torch_compile: Optional[bool] = Field(default=None, description="Enable torch.compile optimization")
+    seed: Optional[int] = Field(default=None, description="Random seed for reproducible generation")
 
 
 class VoiceInfo(BaseModel):
@@ -100,7 +101,7 @@ class VoiceInfo(BaseModel):
 class TTSGenerateRequest(BaseModel):
     """Legacy format for backwards compatibility"""
     text: str = Field(..., max_length=4096)
-    voice_id: str = Field(default="alloy")
+    voice_id: str = Field(..., description="Voice identifier (required - no default voices)")
 
 
 class ModelInfo(BaseModel):
@@ -132,7 +133,7 @@ class VoiceMappingUpdate(BaseModel):
 
 class ServerConfig(BaseModel):
     debug_mode: bool = False
-    save_outputs: bool = False
+    save_outputs: bool = True  # Enable by default so users can hear generated audio
     show_prompts: bool = False
     output_retention_hours: int = 24
     auto_discover_prompts: bool = True
@@ -184,6 +185,7 @@ class TTSJob(BaseModel):
     top_p: Optional[float] = None
     max_tokens: Optional[int] = None
     use_torch_compile: Optional[bool] = None
+    seed: Optional[int] = None
     audio_prompt_used: bool = False
     generation_time: Optional[float] = None
     file_path: Optional[str] = None
@@ -259,14 +261,8 @@ else:  # auto
 security = HTTPBearer(auto_error=False)
 
 # Voice mapping (Dia uses speaker tags [S1]/[S2], we'll map Dia-specific voice names)
-VOICE_MAPPING: Dict[str, Dict[str, Any]] = {
-    "aria": {"style": "neutral", "primary_speaker": "S1", "audio_prompt": None, "audio_prompt_transcript": None},
-    "atlas": {"style": "calm", "primary_speaker": "S1", "audio_prompt": None, "audio_prompt_transcript": None}, 
-    "luna": {"style": "expressive", "primary_speaker": "S2", "audio_prompt": None, "audio_prompt_transcript": None},
-    "kai": {"style": "friendly", "primary_speaker": "S1", "audio_prompt": None, "audio_prompt_transcript": None},
-    "zara": {"style": "deep", "primary_speaker": "S2", "audio_prompt": None, "audio_prompt_transcript": None},
-    "nova": {"style": "bright", "primary_speaker": "S1", "audio_prompt": None, "audio_prompt_transcript": None},
-}
+# Server starts with zero built-in voices - all voices must be explicitly configured
+VOICE_MAPPING: Dict[str, Dict[str, Any]] = {}
 
 # Store uploaded audio prompts (now stores file paths)
 AUDIO_PROMPTS: Dict[str, str] = {}
@@ -874,49 +870,91 @@ def load_multi_gpu_models():
     console.print(f"[bold green]✓ Successfully loaded {len(GPU_MODELS)} model instances across GPUs[/bold green]")
 
 
-def preprocess_text(text: str, voice_id: str, role: Optional[str] = None) -> str:
+def preprocess_text(text: str, voice_id: str, role: Optional[str] = None, request_id: str = "unknown") -> str:
     """Preprocess text for Dia model requirements"""
+    original_text = text
+    
+    if SERVER_CONFIG.debug_mode:
+        console.print(f"[bold yellow]>>> Text Preprocessing - {request_id}[/bold yellow]")
+        console.print(f"[cyan]Original Text:[/cyan] {original_text}")
+        console.print(f"[cyan]Voice ID:[/cyan] {voice_id}")
+        console.print(f"[cyan]Role:[/cyan] {role or 'None'}")
+    
     # Remove asterisks (common in chat applications)
     text = re.sub(r'\*+', '', text)
+    if text != original_text and SERVER_CONFIG.debug_mode:
+        console.print(f"[dim]Removed asterisks: {text}[/dim]")
     
     # Remove extra whitespace
     text = re.sub(r'\s+', ' ', text).strip()
     
     # Ensure text has proper speaker tags for Dia
     if not ('[S1]' in text or '[S2]' in text):
-        # Determine speaker based on role if provided
-        if role:
-            # Map roles to speakers: user -> S1, assistant/system -> S2
-            if role.lower() == "user":
-                primary_speaker = "S1"
-            elif role.lower() in ["assistant", "system"]:
-                primary_speaker = "S2"
+        # Always prioritize voice configuration over role mapping for consistency
+        voice_config = VOICE_MAPPING.get(voice_id)
+        if voice_config is None:
+            console.print(f"[red]❌ Voice '{voice_id}' not found in mappings[/red]")
+            raise HTTPException(status_code=404, detail=f"Voice '{voice_id}' not found")
+        
+        # Use the voice's configured primary speaker
+        primary_speaker = voice_config["primary_speaker"]
+        
+        if SERVER_CONFIG.debug_mode:
+            if role:
+                console.print(f"[cyan]Role provided: {role}, but using voice configuration: {primary_speaker}[/cyan]")
             else:
-                # Unknown role, fall back to voice mapping
-                voice_config = VOICE_MAPPING.get(voice_id, VOICE_MAPPING["alloy"])
-                primary_speaker = voice_config["primary_speaker"]
-        else:
-            # No role provided, use voice mapping to determine primary speaker
-            voice_config = VOICE_MAPPING.get(voice_id, VOICE_MAPPING["alloy"])
-            primary_speaker = voice_config["primary_speaker"]
+                console.print(f"[blue]No role provided, using voice mapping: {primary_speaker}[/blue]")
         
         # Wrap text with proper closing tags: [S1] text [S1]
         text = f"[{primary_speaker}] {text} [{primary_speaker}]"
+        if SERVER_CONFIG.debug_mode:
+            console.print(f"[green]Added speaker tags: {text}[/green]")
     else:
+        if SERVER_CONFIG.debug_mode:
+            console.print(f"[blue]Text already has speaker tags[/blue]")
         # Ensure existing tags are properly closed
         # Simple approach: if we find an opening tag without a closing tag, add it
         if '[S1]' in text and not text.endswith('[S1]'):
             if not text.endswith('[S2]'):
                 text += ' [S1]'
+                if SERVER_CONFIG.debug_mode:
+                    console.print(f"[yellow]Added closing S1 tag: {text}[/yellow]")
         elif '[S2]' in text and not text.endswith('[S2]'):
             if not text.endswith('[S1]'):
                 text += ' [S2]'
+                if SERVER_CONFIG.debug_mode:
+                    console.print(f"[yellow]Added closing S2 tag: {text}[/yellow]")
+    
+    if SERVER_CONFIG.debug_mode:
+        console.print(f"[bold green]Final Processed Text:[/bold green] {text}")
     
     return text
 
 
 # Cache for torch.compile capability per GPU
 TORCH_COMPILE_CACHE: Dict[int, bool] = {}
+
+def set_generation_seed(seed: Optional[int]) -> None:
+    """Set random seed for reproducible generation"""
+    if seed is not None:
+        import random
+        import numpy as np
+        
+        # Set seeds for all random number generators
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
+            
+        # Ensure deterministic behavior for reproducibility
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        
+        if SERVER_CONFIG.debug_mode:
+            console.print(f"[cyan]🌱 Generation seed set to: {seed}[/cyan]")
 
 def can_use_torch_compile(gpu_id: int = 0) -> bool:
     """Check if torch.compile can be used safely on specific GPU"""
@@ -938,8 +976,24 @@ def can_use_torch_compile(gpu_id: int = 0) -> bool:
         import platform
         if platform.system() == "Windows":
             # On Windows, torch.compile often fails without proper MSVC setup
-            TORCH_COMPILE_CACHE[gpu_id] = False
-            return False
+            # But let's try it anyway and fall back if it fails
+            try:
+                # Try a simple compilation test first
+                @torch.compile
+                def test_fn_windows(x):
+                    return x + 1
+                
+                test_tensor = torch.tensor([1.0], device=f"cuda:{gpu_id}")
+                test_fn_windows(test_tensor)
+                torch.cuda.synchronize(gpu_id)
+                
+                console.print(f"[green]✅ Torch compile works on Windows GPU {gpu_id}[/green]")
+                TORCH_COMPILE_CACHE[gpu_id] = True
+                return True
+            except Exception as e:
+                console.print(f"[yellow]⚠️ Torch compile failed on Windows GPU {gpu_id}: {e}[/yellow]")
+                TORCH_COMPILE_CACHE[gpu_id] = False
+                return False
         
         # Try a simple compilation test on the specific GPU
         with torch.cuda.device(gpu_id):
@@ -1031,6 +1085,7 @@ def process_tts_job(job_id: str) -> None:
             job.max_tokens,
             job.use_torch_compile,
             job.role,
+            job.seed,
             worker_id=worker_id
         )
         
@@ -1115,7 +1170,7 @@ def create_generation_progress(text: str, voice_id: str, gpu_id: int, worker_id:
 
 def generate_audio_from_text(
     text: str, 
-    voice_id: str = "alloy", 
+    voice_id: str, 
     speed: float = 0.8,
     temperature: Optional[float] = None,
     cfg_scale: Optional[float] = None,
@@ -1123,114 +1178,131 @@ def generate_audio_from_text(
     max_tokens: Optional[int] = None,
     use_torch_compile: Optional[bool] = None,
     role: Optional[str] = None,
-    worker_id: int = 0
+    seed: Optional[int] = None,
+    worker_id: int = 0,
+    request_id: str = "unknown"
 ) -> tuple[np.ndarray, str]:
     """Generate audio using Dia model and return (audio, log_id)"""
-    # Get model for this worker
-    model_instance, gpu_id = get_model_for_worker(worker_id)
-    
-    if model_instance is None:
-        raise RuntimeError("Model not loaded")
-    
-    start_time = time.time()
-    log_id = str(uuid.uuid4())
-    
-    # Preprocess text
-    processed_text = preprocess_text(text, voice_id, role)
-    
-    # Get voice configuration
-    voice_config = VOICE_MAPPING.get(voice_id, VOICE_MAPPING["aria"])
-    
-    # Get audio prompt if available with improved validation
-    audio_prompt = None
-    audio_prompt_used = False
-    audio_prompt_transcript = None
-    
-    if voice_config.get("audio_prompt"):
-        audio_prompt_id = voice_config["audio_prompt"]
+    try:
+        # Get model for this worker
+        model_instance, gpu_id = get_model_for_worker(worker_id)
         
-        if audio_prompt_id in AUDIO_PROMPTS:
-            audio_prompt_path = AUDIO_PROMPTS[audio_prompt_id]
+        if model_instance is None:
+            console.print(f"[red]❌ Model not loaded for worker {worker_id}[/red]")
+            raise RuntimeError("Model not loaded")
+        
+        start_time = time.time()
+        log_id = str(uuid.uuid4())
+        
+        console.print(f"\n[bold magenta]>>> Audio Generation - {request_id} (Log: {log_id[:8]})[/bold magenta]")
+        console.print(f"[cyan]Worker ID:[/cyan] {worker_id}")
+        console.print(f"[cyan]GPU ID:[/cyan] {gpu_id}")
+        console.print(f"[cyan]Model Instance:[/cyan] {'Loaded' if model_instance else 'Not Loaded'}")
+        
+        # Set random seed for reproducible generation
+        set_generation_seed(seed)
+        
+        # Preprocess text
+        processed_text = preprocess_text(text, voice_id, role, request_id)
+        
+        # Get voice configuration
+        voice_config = VOICE_MAPPING.get(voice_id)
+        if voice_config is None:
+            console.print(f"[red]❌ Voice configuration not found for '{voice_id}'[/red]")
+            console.print(f"[yellow]Available voices: {list(VOICE_MAPPING.keys())}[/yellow]")
+            raise HTTPException(status_code=404, detail=f"Voice '{voice_id}' not found. Available voices: {list(VOICE_MAPPING.keys())}")
+        
+        console.print(f"[bold cyan]>>> Voice Configuration Analysis - {request_id}[/bold cyan]")
+        console.print(f"[cyan]Voice ID:[/cyan] {voice_id}")
+        console.print(f"[cyan]Style:[/cyan] {voice_config.get('style', 'N/A')}")
+        console.print(f"[cyan]Primary Speaker:[/cyan] {voice_config.get('primary_speaker', 'N/A')}")
+        
+        # Get audio prompt if available with improved validation
+        audio_prompt = None
+        audio_prompt_used = False
+        audio_prompt_transcript = None
+        
+        if voice_config.get("audio_prompt"):
+            audio_prompt_id = voice_config["audio_prompt"]
+            console.print(f"[cyan]Audio Prompt ID:[/cyan] {audio_prompt_id}")
             
-            # Convert to absolute path for consistency
-            if not os.path.isabs(audio_prompt_path):
-                audio_prompt_path = os.path.abspath(audio_prompt_path)
-            
-            if os.path.exists(audio_prompt_path) and os.path.isfile(audio_prompt_path):
-                # Validate audio file accessibility
-                try:
-                    # Quick validation that file can be read
-                    with open(audio_prompt_path, 'rb') as f:
-                        f.read(1024)  # Read first KB to validate
-                    
-                    audio_prompt = audio_prompt_path
-                    audio_prompt_used = True
-                    
-                    # Get transcript if available
-                    audio_prompt_transcript = voice_config.get("audio_prompt_transcript")
-                    
-                    if SERVER_CONFIG.debug_mode:
-                        console.print(f"[green]✓ Using audio prompt: {os.path.basename(audio_prompt_path)}[/green]")
+            if audio_prompt_id in AUDIO_PROMPTS:
+                audio_prompt_path = AUDIO_PROMPTS[audio_prompt_id]
+                console.print(f"[cyan]Audio Prompt Path:[/cyan] {audio_prompt_path}")
+                
+                # Convert to absolute path for consistency
+                if not os.path.isabs(audio_prompt_path):
+                    audio_prompt_path = os.path.abspath(audio_prompt_path)
+                
+                if os.path.exists(audio_prompt_path) and os.path.isfile(audio_prompt_path):
+                    # Validate audio file accessibility
+                    try:
+                        # Quick validation that file can be read
+                        with open(audio_prompt_path, 'rb') as f:
+                            data = f.read(1024)  # Read first KB to validate
+                        
+                        file_size = os.path.getsize(audio_prompt_path)
+                        console.print(f"[green]✓ Audio prompt validated: {os.path.basename(audio_prompt_path)} ({file_size} bytes)[/green]")
+                        
+                        audio_prompt = audio_prompt_path
+                        audio_prompt_used = True
+                        
+                        # Get transcript if available
+                        audio_prompt_transcript = voice_config.get("audio_prompt_transcript")
+                        
                         if audio_prompt_transcript:
-                            preview = audio_prompt_transcript[:30] + "..." if len(audio_prompt_transcript) > 30 else audio_prompt_transcript
-                            console.print(f"[dim]Transcript: {preview}[/dim]")
-                            
-                except Exception as e:
-                    console.print(f"[red]❌ Audio prompt file corrupted or unreadable: {audio_prompt_path}[/red]")
-                    console.print(f"[red]Error: {e}[/red]")
+                            preview = audio_prompt_transcript[:50] + "..." if len(audio_prompt_transcript) > 50 else audio_prompt_transcript
+                            console.print(f"[green]✓ Transcript available:[/green] {preview}")
+                        else:
+                            console.print(f"[yellow]⚠️ No transcript available for audio prompt[/yellow]")
+                                
+                    except Exception as e:
+                        console.print(f"[red]❌ Audio prompt file corrupted or unreadable: {audio_prompt_path}[/red]")
+                        console.print(f"[red]Error: {e}[/red]")
+                        audio_prompt_used = False
+                else:
+                    console.print(f"[red]❌ Audio prompt file not found: {audio_prompt_path}[/red]")
                     audio_prompt_used = False
             else:
-                console.print(f"[yellow]⚠️ Audio prompt file not found: {audio_prompt_path}[/yellow]")
+                console.print(f"[red]❌ Audio prompt ID '{audio_prompt_id}' not registered in AUDIO_PROMPTS[/red]")
+                console.print(f"[yellow]Available audio prompts: {list(AUDIO_PROMPTS.keys())}[/yellow]")
                 audio_prompt_used = False
         else:
-            console.print(f"[yellow]⚠️ Audio prompt ID '{audio_prompt_id}' not registered[/yellow]")
-            audio_prompt_used = False
-    
-    # Add audio prompt transcript to processed text for better voice cloning
-    if audio_prompt_transcript and audio_prompt_used:
-        # Prepend the transcript for better voice cloning results
-        processed_text = audio_prompt_transcript + " " + processed_text
-        if SERVER_CONFIG.debug_mode:
-            console.print(f"[dim]Enhanced text with transcript: {processed_text[:100]}...[/dim]")
-    
-    # Set default parameters
-    generation_params = {
-        "temperature": temperature or 1.2,
-        "cfg_scale": cfg_scale or 3.0,
-        "top_p": top_p or 0.95,
-        "max_tokens": max_tokens,
-        "use_torch_compile": use_torch_compile if use_torch_compile is not None else can_use_torch_compile(gpu_id),
-        "verbose": SERVER_CONFIG.debug_mode
-    }
-    
-    # Create progress display
-    if SERVER_CONFIG.debug_mode or SERVER_CONFIG.show_prompts:
-        info_table = create_generation_progress(text, voice_id, gpu_id, worker_id)
+            console.print(f"[blue]ℹ️ No audio prompt configured for voice '{voice_id}'[/blue]")
         
-        # Add additional info
-        panel = Panel(
-            info_table,
-            expand=False,
-            border_style="cyan"
-        )
-        console.print(panel)
+        # Log audio prompt transcript availability (but don't prepend to avoid double-speaking)
+        if audio_prompt_transcript and audio_prompt_used:
+            console.print(f"[bold cyan]>>> Audio Prompt Context - {request_id}[/bold cyan]")
+            console.print(f"[green]✓ Audio prompt transcript available for voice conditioning[/green]")
+            transcript_preview = audio_prompt_transcript[:100] + "..." if len(audio_prompt_transcript) > 100 else audio_prompt_transcript
+            console.print(f"[cyan]Transcript:[/cyan] {transcript_preview}")
+            console.print(f"[cyan]Generation Text:[/cyan] {processed_text}")
+            console.print(f"[blue]Note: Transcript used for voice conditioning, not spoken output[/blue]")
         
-        # Show generation parameters
-        param_text = Text()
-        param_text.append("Generation Parameters:\n", style="bold yellow")
-        param_text.append(f"  Temperature: {generation_params['temperature']}\n")
-        param_text.append(f"  CFG Scale: {generation_params['cfg_scale']}\n")
-        param_text.append(f"  Top-p: {generation_params['top_p']}\n")
-        if generation_params['max_tokens']:
-            param_text.append(f"  Max Tokens: {generation_params['max_tokens']}\n")
-        param_text.append(f"  Audio Prompt: {'Yes' if audio_prompt_used else 'No'}\n")
-        param_text.append(f"  Processed Text: {processed_text[:100]}...\n" if len(processed_text) > 100 else f"  Processed Text: {processed_text}\n")
+        # Set default parameters with improved max_tokens handling
+        # Estimate tokens needed based on text length (roughly 1 token per character for safety)
+        estimated_tokens_needed = len(processed_text) * 2  # Conservative estimate
+        default_max_tokens = max(2000, estimated_tokens_needed)  # At least 2000, more if needed
         
-        console.print(param_text)
-    
-    # Generate audio
-    try:
-        # Generate with proper CUDA context and audio prompt handling
+        generation_params = {
+            "temperature": temperature or 1.2,
+            "cfg_scale": cfg_scale or 3.0,
+            "top_p": top_p or 0.95,
+            "max_tokens": max_tokens or default_max_tokens,  # Use calculated default if not specified
+            "use_torch_compile": use_torch_compile if use_torch_compile is not None else can_use_torch_compile(gpu_id),
+            "verbose": SERVER_CONFIG.debug_mode
+        }
+        
+        console.print(f"[bold cyan]>>> Final Generation Parameters - {request_id}[/bold cyan]")
+        for param, value in generation_params.items():
+            console.print(f"[cyan]{param}:[/cyan] {value}")
+        console.print(f"[cyan]Audio Prompt Used:[/cyan] {'✅ Yes' if audio_prompt_used else '❌ No'}")
+        console.print(f"[cyan]Estimated Tokens Needed:[/cyan] {estimated_tokens_needed}")
+        if seed is not None:
+            console.print(f"[cyan]Seed:[/cyan] {seed}")
+        
+        # Generate audio with proper error handling
+        console.print(f"\n[bold green]>>> Starting Audio Generation - {request_id}[/bold green]")
         generation_start = time.time()
         
         # Ensure we're on the correct CUDA device
@@ -1239,113 +1311,26 @@ def generate_audio_from_text(
             model_device = int(str(model_instance.device).split(':')[1]) if ':' in str(model_instance.device) else 0
             if current_device != model_device:
                 torch.cuda.set_device(model_device)
-        
-        # Only show progress in debug mode or if there's only one worker
-        show_progress = SERVER_CONFIG.debug_mode or MAX_WORKERS == 1
-        
-        if show_progress:
-            try:
-                with CONSOLE_LOCK:  # Ensure only one progress display at a time
-                    with Progress(
-                        SpinnerColumn(),
-                        TextColumn("[progress.description]{task.description}"),
-                        BarColumn(),
-                        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                        TimeElapsedColumn(),
-                        console=console,
-                        transient=True
-                    ) as progress:
-                        # Add generation task
-                        gen_task = progress.add_task(
-                            f"[cyan]Generating audio on GPU {gpu_id}...[/cyan]",
-                            total=100
-                        )
-                        
-                        # Update progress periodically (we'll simulate progress since model doesn't provide callbacks)
-                        stop_progress = threading.Event()
-                        def update_progress():
-                            elapsed = 0
-                            while not stop_progress.is_set() and elapsed < 30:  # Max 30 seconds timeout
-                                time.sleep(0.1)
-                                elapsed = time.time() - generation_start
-                                # Simulate progress based on typical generation time (3-5 seconds)
-                                simulated_progress = min(95, (elapsed / 4.0) * 100)
-                                progress.update(gen_task, completed=simulated_progress)
-                        
-                        # Start progress updater in background
-                        progress_thread = threading.Thread(target=update_progress, daemon=True)
-                        progress_thread.start()
-                        
-                        try:
-                            # Set verbose=True to get token speed info from model
-                            generation_params['verbose'] = SERVER_CONFIG.debug_mode
-                            
-                            # Use CUDA stream for async execution if available
-                            if gpu_id in CUDA_STREAMS:
-                                with torch.cuda.stream(CUDA_STREAMS[gpu_id]):
-                                    audio_output = model_instance.generate(
-                                        processed_text,
-                                        audio_prompt=audio_prompt,
-                                        **generation_params
-                                    )
-                                    torch.cuda.synchronize(gpu_id)
-                            else:
-                                audio_output = model_instance.generate(
-                                    processed_text,
-                                    audio_prompt=audio_prompt,
-                                    **generation_params
-                                )
-                            
-                            # Stop progress thread
-                            stop_progress.set()
-                            progress.update(gen_task, completed=100)
-                            
-                        finally:
-                            stop_progress.set()
-                            if progress_thread.is_alive():
-                                progress_thread.join(timeout=0.5)
-            except Exception as e:
-                # Catch any Rich display errors and continue
-                if SERVER_CONFIG.debug_mode:
-                    console.print(f"[yellow]Progress display error: {e}[/yellow]")
-                
-                # Still generate audio without progress display
-                generation_params['verbose'] = SERVER_CONFIG.debug_mode
-                
-                # Use CUDA stream for async execution if available
-                if gpu_id in CUDA_STREAMS:
-                    with torch.cuda.stream(CUDA_STREAMS[gpu_id]):
-                        audio_output = model_instance.generate(
-                            processed_text,
-                            audio_prompt=audio_prompt,
-                            **generation_params
-                        )
-                        torch.cuda.synchronize(gpu_id)
-                else:
-                    audio_output = model_instance.generate(
-                        processed_text,
-                        audio_prompt=audio_prompt,
-                        **generation_params
-                    )
+                console.print(f"[yellow]Switched CUDA device to: {model_device}[/yellow]")
+            console.print(f"[cyan]Using CUDA device:[/cyan] {model_device}")
         else:
-            # No progress display for concurrent workers
-            generation_params['verbose'] = SERVER_CONFIG.debug_mode
-            
-            # Use CUDA stream for async execution if available
-            if gpu_id in CUDA_STREAMS:
-                with torch.cuda.stream(CUDA_STREAMS[gpu_id]):
-                    audio_output = model_instance.generate(
-                        processed_text,
-                        audio_prompt=audio_prompt,
-                        **generation_params
-                    )
-                    torch.cuda.synchronize(gpu_id)
-            else:
+            console.print(f"[cyan]Using device:[/cyan] CPU or MPS")
+        
+        # Use CUDA stream for async execution if available
+        if gpu_id in CUDA_STREAMS:
+            with torch.cuda.stream(CUDA_STREAMS[gpu_id]):
                 audio_output = model_instance.generate(
                     processed_text,
                     audio_prompt=audio_prompt,
                     **generation_params
                 )
+                torch.cuda.synchronize(gpu_id)
+        else:
+            audio_output = model_instance.generate(
+                processed_text,
+                audio_prompt=audio_prompt,
+                **generation_params
+            )
         
         # Apply speed adjustment if needed
         if speed != 1.0 and audio_output is not None:
@@ -1401,9 +1386,17 @@ def generate_audio_from_text(
             filename = f"{timestamp}_{log_id[:8]}_{voice_id}.wav"
             file_path = os.path.join(OUTPUT_DIR, filename)
             
+            console.print(f"[cyan]💾 Saving audio to:[/cyan] {file_path}")
+            
             # Save audio file
             sf.write(file_path, audio_output, 44100, format='WAV', subtype='PCM_16')
             file_size = os.path.getsize(file_path)
+            
+            console.print(f"[green]✅ Audio saved successfully ({file_size} bytes)[/green]")
+        elif not SERVER_CONFIG.save_outputs:
+            console.print(f"[yellow]⚠️ File saving disabled (save_outputs=False)[/yellow]")
+        elif audio_output is None:
+            console.print(f"[red]❌ No audio output to save[/red]")
         
         # Create log entry
         log_entry = GenerationLog(
@@ -1429,7 +1422,7 @@ def generate_audio_from_text(
     except Exception as e:
         # If torch.compile fails, try again without it
         if "Compiler:" in str(e) and "not found" in str(e):
-            print("Torch compile failed, retrying without compilation...")
+            console.print("[yellow]Torch compile failed, retrying without compilation...[/yellow]")
             try:
                 # Retry with compilation disabled
                 retry_params = generation_params.copy()
@@ -1438,14 +1431,14 @@ def generate_audio_from_text(
                 # Use CUDA stream for retry if available
                 if gpu_id in CUDA_STREAMS:
                     with torch.cuda.stream(CUDA_STREAMS[gpu_id]):
-                        audio_output = model.generate(
+                        audio_output = model_instance.generate(
                             processed_text,
                             audio_prompt=audio_prompt,
                             **retry_params
                         )
                         torch.cuda.synchronize(gpu_id)
                 else:
-                    audio_output = model.generate(
+                    audio_output = model_instance.generate(
                         processed_text,
                         audio_prompt=audio_prompt,
                         **retry_params
@@ -1488,13 +1481,13 @@ def generate_audio_from_text(
                 
                 return audio_output, log_id
             except Exception as retry_e:
-                print(f"Retry without compilation also failed: {retry_e}")
+                console.print(f"[red]Retry without compilation also failed: {retry_e}[/red]")
                 raise HTTPException(status_code=500, detail=f"Audio generation failed: {retry_e}")
         
-        print(f"Error generating audio: {e}")
-        print(f"Text: {processed_text}")
-        print(f"Voice: {voice_id}")
-        print(f"Audio prompt available: {audio_prompt is not None}")
+        console.print(f"[red]Error generating audio: {e}[/red]")
+        console.print(f"[yellow]Text: {processed_text}[/yellow]")
+        console.print(f"[yellow]Voice: {voice_id}[/yellow]")
+        console.print(f"[yellow]Audio prompt available: {audio_prompt is not None}[/yellow]")
         raise HTTPException(status_code=500, detail=f"Audio generation failed: {e}")
 
 
@@ -1656,16 +1649,44 @@ async def list_voices():
 @app.post("/generate")
 async def generate_speech(
     request: TTSRequest, 
-    async_mode: bool = Query(default=False, description="Return job ID for async processing")
+    async_mode: bool = Query(default=False, description="Return job ID for async processing"),
+    request_id: str = Header(default=None, alias="X-Request-ID")
 ):
     """Main TTS generation endpoint - supports both sync and async modes"""
-    # Log incoming request
-    if SERVER_CONFIG.debug_mode:
-        console.print(f"\n[bold blue]>>> New TTS Request[/bold blue]")
-        console.print(f"[cyan]Mode:[/cyan] {'Async' if async_mode else 'Sync'}")
-        console.print(f"[cyan]Voice:[/cyan] {request.voice_id}")
-        console.print(f"[cyan]Text Length:[/cyan] {len(request.text)} chars")
+    # Generate request ID if not provided
+    if not request_id:
+        request_id = str(uuid.uuid4())[:8]
+    
+    # Enhanced request logging
+    console.print(f"\n[bold blue]>>> TTS Request {request_id}[/bold blue]")
+    console.print(f"[cyan]Timestamp:[/cyan] {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
+    console.print(f"[cyan]Mode:[/cyan] {'Async' if async_mode else 'Sync'}")
+    console.print(f"[cyan]Voice ID:[/cyan] {request.voice_id}")
+    console.print(f"[cyan]Role:[/cyan] {request.role or 'None'}")
+    console.print(f"[cyan]Text Length:[/cyan] {len(request.text)} chars")
+    console.print(f"[cyan]Speed:[/cyan] {request.speed}")
+    
+    # Log generation parameters
+    if SERVER_CONFIG.debug_mode or SERVER_CONFIG.show_prompts:
+        params_table = Table(title=f"Generation Parameters - {request_id}")
+        params_table.add_column("Parameter", style="cyan")
+        params_table.add_column("Value", style="white")
+        
+        params_table.add_row("Temperature", str(request.temperature or "default"))
+        params_table.add_row("CFG Scale", str(request.cfg_scale or "default"))
+        params_table.add_row("Top P", str(request.top_p or "default"))
+        params_table.add_row("Max Tokens", str(request.max_tokens or "default"))
+        params_table.add_row("Torch Compile", str(request.use_torch_compile or "default"))
+        params_table.add_row("Seed", str(request.seed or "random"))
+        
+        console.print(params_table)
+    
+    # Log prompt text if enabled
+    if SERVER_CONFIG.show_prompts:
+        console.print(f"[yellow]Input Text:[/yellow] {request.text}")
+    
     if not request.text.strip():
+        console.print(f"[red]❌ Request {request_id} rejected: Empty text[/red]")
         raise HTTPException(status_code=400, detail="Text cannot be empty")
     
     if async_mode:
@@ -1718,7 +1739,9 @@ async def generate_speech(
                 max_tokens=request.max_tokens,
                 use_torch_compile=request.use_torch_compile,
                 role=request.role,
-                worker_id=sync_worker_id
+                seed=request.seed,
+                worker_id=sync_worker_id,
+                request_id=request_id
             )
             
             if audio_data is None:
@@ -1798,7 +1821,7 @@ async def get_voice_preview(voice_id: str):
     preview_text = f"[S1] Hello, this is a preview of the {voice_id} voice. [S2] How does this sound to you?"
     
     try:
-        audio_data, log_id = generate_audio_from_text(preview_text, voice_id)
+        audio_data, log_id = generate_audio_from_text(preview_text, voice_id, seed=None)
         
         with io.BytesIO() as buffer:
             sf.write(buffer, audio_data, 44100, format='WAV', subtype='PCM_16')
@@ -1870,12 +1893,7 @@ async def create_voice_mapping(mapping: VoiceMappingUpdate):
 
 @app.delete("/voice_mappings/{voice_id}")
 async def delete_voice_mapping(voice_id: str):
-    """Delete voice mapping (only custom voices, not defaults)"""
-    default_voices = {"aria", "atlas", "luna", "kai", "zara", "nova"}
-    
-    if voice_id in default_voices:
-        raise HTTPException(status_code=400, detail=f"Cannot delete default voice '{voice_id}'")
-    
+    """Delete voice mapping"""
     if voice_id not in VOICE_MAPPING:
         raise HTTPException(status_code=404, detail=f"Voice '{voice_id}' not found")
     
@@ -2465,17 +2483,26 @@ async def load_whisper():
 async def create_speech_v1(
     model: str = "dia",
     input: str = "",
-    voice: str = "aria",
+    voice: str = "",
     response_format: str = "wav",
-    speed: float = 1.0
+    speed: float = 1.0,
+    seed: Optional[int] = None
 ):
     """SillyTavern-compatible TTS endpoint"""
+    # Validate required fields
+    if not input.strip():
+        raise HTTPException(status_code=400, detail="Input text is required")
+    
+    if not voice.strip():
+        raise HTTPException(status_code=400, detail="Voice identifier is required (no default voices available)")
+    
     # Convert SillyTavern format to internal format
     tts_request = TTSRequest(
         text=input,
         voice_id=voice,
         response_format=response_format,
-        speed=speed
+        speed=speed,
+        seed=seed
     )
     
     # Use sync generation for compatibility

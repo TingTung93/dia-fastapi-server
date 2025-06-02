@@ -98,11 +98,29 @@ def sample_text():
 
 
 @pytest.fixture
+def test_voice_mappings():
+    """Create test voice mappings for testing."""
+    return {
+        "test_voice": {
+            "style": "neutral", 
+            "primary_speaker": "S1", 
+            "audio_prompt": None, 
+            "audio_prompt_transcript": None
+        },
+        "alloy": {  # Keep for backward compatibility with existing tests
+            "style": "neutral", 
+            "primary_speaker": "S1", 
+            "audio_prompt": None, 
+            "audio_prompt_transcript": None
+        }
+    }
+
+@pytest.fixture
 def sample_request_data():
     """Sample request data for API tests."""
     return {
         "text": "Hello, this is a test.",
-        "voice_id": "alloy",
+        "voice_id": "test_voice",
         "response_format": "wav",
         "speed": 1.0
     }
@@ -139,6 +157,14 @@ def mock_job_result(mock_audio_data):
 
 
 @pytest.fixture
+def client(mock_torch, mock_dia_model, test_voice_mappings):
+    """Test client for FastAPI with all necessary mocks."""
+    with patch('src.server.DIA_MODEL', mock_dia_model), \
+         patch.dict('src.server.VOICE_MAPPING', test_voice_mappings, clear=True):
+        from src.server import app
+        return TestClient(app)
+
+@pytest.fixture
 async def async_client():
     """Async test client for FastAPI."""
     # This will be used for actual integration tests
@@ -162,10 +188,11 @@ def mock_worker_pool():
 
 
 @pytest.fixture(autouse=True)
-def mock_server_startup():
-    """Automatically mock server startup functions."""
+def mock_server_startup(test_voice_mappings):
+    """Automatically mock server startup functions and inject test voices."""
     with patch('src.server.load_model') as mock_load, \
-         patch('src.server.initialize_worker_pool') as mock_init:
+         patch('src.server.initialize_worker_pool') as mock_init, \
+         patch.dict('src.server.VOICE_MAPPING', test_voice_mappings, clear=True):
         # Prevent actual initialization
         mock_load.return_value = None
         mock_init.return_value = None

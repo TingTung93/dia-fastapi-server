@@ -1,0 +1,674 @@
+openapi: 3.0.3
+info:
+  title: Dia TTS Server API
+  description: FastAPI server for Dia text-to-speech model with voice cloning and reproducible generation
+  version: 1.0.0
+  contact:
+    name: Dia TTS Server
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:7860
+    description: Local development server
+
+tags:
+  - name: generation
+    description: Core TTS generation endpoints
+  - name: voices
+    description: Voice management and configuration
+  - name: audio_prompts
+    description: Audio prompt upload and management
+  - name: jobs
+    description: Asynchronous job management
+  - name: system
+    description: System information and health checks
+
+paths:
+  /generate:
+    post:
+      tags:
+        - generation
+      summary: Generate speech (sync/async)
+      description: Primary TTS generation endpoint supporting both synchronous and asynchronous modes with seed support
+      parameters:
+        - name: async_mode
+          in: query
+          description: Return job ID for async processing
+          required: false
+          schema:
+            type: boolean
+            default: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TTSRequest'
+            examples:
+              with_seed:
+                summary: Generation with seed (recommended)
+                value:
+                  text: "[S1] Hello world! [S2] How are you today?"
+                  voice_id: "seraphina_voice"
+                  seed: 42
+                  temperature: 1.2
+                  cfg_scale: 3.0
+                  top_p: 0.95
+              basic:
+                summary: Basic generation
+                value:
+                  text: "[S1] Simple text generation"
+                  voice_id: "seraphina_voice"
+      responses:
+        '200':
+          description: Audio file generated successfully (sync mode)
+          content:
+            audio/wav:
+              schema:
+                type: string
+                format: binary
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+                example: "attachment; filename=speech.wav"
+            X-Generation-ID:
+              schema:
+                type: string
+                description: Generation log ID (debug mode only)
+        '202':
+          description: Job queued for processing (async mode)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AsyncJobResponse'
+
+  /v1/audio/speech:
+    post:
+      tags:
+        - generation
+      summary: OpenAI-compatible TTS endpoint
+      description: SillyTavern and OpenAI Audio API compatible endpoint with seed support
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OpenAIRequest'
+            examples:
+              with_seed:
+                summary: OpenAI format with seed
+                value:
+                  input: "Hello, this is a test message"
+                  voice: "seraphina_voice"
+                  seed: 42
+                  model: "dia"
+                  speed: 1.0
+      responses:
+        '200':
+          description: Audio file generated successfully
+          content:
+            audio/wav:
+              schema:
+                type: string
+                format: binary
+
+  /voices:
+    get:
+      tags:
+        - voices
+      summary: List available voices
+      description: Get all configured voices and their properties
+      responses:
+        '200':
+          description: List of available voices
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoicesResponse'
+
+  /voice_mappings:
+    get:
+      tags:
+        - voices
+      summary: Get voice mappings
+      responses:
+        '200':
+          description: Current voice mappings
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  $ref: '#/components/schemas/VoiceMapping'
+    
+    post:
+      tags:
+        - voices
+      summary: Create voice mapping
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VoiceMappingUpdate'
+      responses:
+        '200':
+          description: Voice mapping created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceMappingResponse'
+
+  /voice_mappings/{voice_id}:
+    put:
+      tags:
+        - voices
+      summary: Update voice mapping
+      parameters:
+        - name: voice_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VoiceMappingUpdate'
+      responses:
+        '200':
+          description: Voice mapping updated successfully
+        '404':
+          description: Voice not found
+
+    delete:
+      tags:
+        - voices
+      summary: Delete voice mapping
+      parameters:
+        - name: voice_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Voice mapping deleted successfully
+        '404':
+          description: Voice not found
+
+  /preview/{voice_id}:
+    get:
+      tags:
+        - voices
+      summary: Generate voice preview
+      parameters:
+        - name: voice_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Preview audio generated
+          content:
+            audio/wav:
+              schema:
+                type: string
+                format: binary
+
+  /audio_prompts/upload:
+    post:
+      tags:
+        - audio_prompts
+      summary: Upload audio prompt
+      description: Upload audio file for voice cloning
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                prompt_id:
+                  type: string
+                  description: Unique identifier for the audio prompt
+                audio_file:
+                  type: string
+                  format: binary
+                  description: Audio file (WAV, MP3, FLAC, etc.)
+              required:
+                - prompt_id
+                - audio_file
+      responses:
+        '200':
+          description: Audio prompt uploaded successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AudioUploadResponse'
+
+  /audio_prompts/discover:
+    post:
+      tags:
+        - audio_prompts
+      summary: Discover audio prompts
+      description: Automatically discover and transcribe audio prompts
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                force_retranscribe:
+                  type: boolean
+                  default: false
+      responses:
+        '200':
+          description: Audio prompts discovered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiscoveryResponse'
+
+  /jobs/{job_id}:
+    get:
+      tags:
+        - jobs
+      summary: Get job status
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Job status retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TTSJob'
+
+  /jobs/{job_id}/result:
+    get:
+      tags:
+        - jobs
+      summary: Download job result
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Job result downloaded
+          content:
+            audio/wav:
+              schema:
+                type: string
+                format: binary
+
+  /health:
+    get:
+      tags:
+        - system
+      summary: Health check
+      responses:
+        '200':
+          description: Server health status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /gpu/status:
+    get:
+      tags:
+        - system
+      summary: GPU status
+      responses:
+        '200':
+          description: GPU configuration and memory status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GPUStatus'
+
+components:
+  schemas:
+    TTSRequest:
+      type: object
+      required:
+        - text
+        - voice_id
+      properties:
+        text:
+          type: string
+          maxLength: 4096
+          description: Text to convert to speech
+          example: "[S1] Hello world! [S2] How are you today?"
+        voice_id:
+          type: string
+          description: Voice identifier (no default voices available)
+          example: "seraphina_voice"
+        response_format:
+          type: string
+          enum: ["wav", "mp3"]
+          default: "wav"
+          description: Audio format
+        speed:
+          type: number
+          minimum: 0.25
+          maximum: 4.0
+          default: 1.0
+          description: Speech speed
+        role:
+          type: string
+          enum: ["user", "assistant", "system"]
+          nullable: true
+          description: Speaker role for automatic speaker assignment
+        temperature:
+          type: number
+          minimum: 0.1
+          maximum: 2.0
+          nullable: true
+          description: Sampling temperature for randomness control
+        cfg_scale:
+          type: number
+          minimum: 1.0
+          maximum: 10.0
+          nullable: true
+          description: Classifier-free guidance scale
+        top_p:
+          type: number
+          minimum: 0.0
+          maximum: 1.0
+          nullable: true
+          description: Top-p sampling for nucleus sampling
+        max_tokens:
+          type: integer
+          minimum: 100
+          maximum: 10000
+          nullable: true
+          description: Maximum tokens to generate
+        use_torch_compile:
+          type: boolean
+          nullable: true
+          description: Enable torch.compile optimization
+        seed:
+          type: integer
+          nullable: true
+          description: Random seed for reproducible generation
+          example: 42
+
+    OpenAIRequest:
+      type: object
+      required:
+        - input
+        - voice
+      properties:
+        input:
+          type: string
+          description: Text to convert to speech
+          example: "Hello, this is a test message"
+        voice:
+          type: string
+          description: Voice identifier
+          example: "seraphina_voice"
+        model:
+          type: string
+          default: "dia"
+          description: Model name
+        response_format:
+          type: string
+          enum: ["wav", "mp3"]
+          default: "wav"
+        speed:
+          type: number
+          minimum: 0.25
+          maximum: 4.0
+          default: 1.0
+        seed:
+          type: integer
+          nullable: true
+          description: Random seed for reproducible generation
+          example: 42
+
+    VoiceMapping:
+      type: object
+      properties:
+        style:
+          type: string
+          example: "conversational"
+        primary_speaker:
+          type: string
+          enum: ["S1", "S2"]
+          example: "S1"
+        audio_prompt:
+          type: string
+          nullable: true
+          example: "seraphina_voice"
+        audio_prompt_transcript:
+          type: string
+          nullable: true
+          example: "Because she has crazy eyes..."
+
+    VoiceMappingUpdate:
+      type: object
+      required:
+        - voice_id
+      properties:
+        voice_id:
+          type: string
+          example: "my_custom_voice"
+        style:
+          type: string
+          nullable: true
+          example: "neutral"
+        primary_speaker:
+          type: string
+          enum: ["S1", "S2"]
+          nullable: true
+          example: "S1"
+        audio_prompt:
+          type: string
+          nullable: true
+        audio_prompt_transcript:
+          type: string
+          nullable: true
+
+    VoicesResponse:
+      type: object
+      properties:
+        voices:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                example: "seraphina_voice"
+              name:
+                type: string
+                example: "seraphina_voice"
+              style:
+                type: string
+                example: "conversational"
+              primary_speaker:
+                type: string
+                example: "S1"
+              has_audio_prompt:
+                type: boolean
+                example: true
+              preview_url:
+                type: string
+                example: "/preview/seraphina_voice"
+
+    TTSJob:
+      type: object
+      properties:
+        id:
+          type: string
+          example: "job-uuid"
+        status:
+          type: string
+          enum: ["pending", "processing", "completed", "failed", "cancelled"]
+        created_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+        text:
+          type: string
+        voice_id:
+          type: string
+        seed:
+          type: integer
+          nullable: true
+          example: 42
+        generation_time:
+          type: number
+          nullable: true
+        worker_id:
+          type: string
+          nullable: true
+
+    AsyncJobResponse:
+      type: object
+      properties:
+        job_id:
+          type: string
+          example: "uuid-string"
+        status:
+          type: string
+          example: "pending"
+        message:
+          type: string
+          example: "Job queued for processing"
+
+    AudioUploadResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          example: "Audio prompt 'my_voice' uploaded successfully"
+        duration:
+          type: number
+          example: 8.55
+        sample_rate:
+          type: integer
+          example: 44100
+        original_sample_rate:
+          type: integer
+          example: 22050
+        channels:
+          type: string
+          example: "mono"
+
+    DiscoveryResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          example: "Discovered 2 audio prompts"
+        total_prompts:
+          type: integer
+          example: 2
+        discovered:
+          type: array
+          items:
+            type: object
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: "healthy"
+        model_loaded:
+          type: boolean
+          example: true
+        timestamp:
+          type: number
+          example: 1642234567.89
+
+    GPUStatus:
+      type: object
+      properties:
+        gpu_mode:
+          type: string
+          example: "multi"
+        gpu_count:
+          type: integer
+          example: 2
+        allowed_gpus:
+          type: array
+          items:
+            type: integer
+          example: [0, 1]
+        use_multi_gpu:
+          type: boolean
+          example: true
+        models_loaded:
+          type: object
+          additionalProperties:
+            type: boolean
+        gpu_memory:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              allocated_gb:
+                type: number
+              reserved_gb:
+                type: number
+              total_gb:
+                type: number
+              free_gb:
+                type: number
+
+    VoiceMappingResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          example: "Voice 'my_voice' created successfully"
+        voice_config:
+          $ref: '#/components/schemas/VoiceMapping'
+
+    Error:
+      type: object
+      properties:
+        detail:
+          type: string
+          example: "Voice 'invalid_voice' not found. Available voices: ['seraphina_voice']"
+
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    
+    ServerError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error' 
