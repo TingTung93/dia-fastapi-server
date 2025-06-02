@@ -485,13 +485,23 @@ Comprehensive API endpoint testing with the pytest framework.
 
 📚 **Complete documentation available in [`docs/`](docs/) folder:**
 
+### 🚀 **Setup & Installation**
 - 🖥️ **[Windows Setup](docs/WINDOWS_SETUP.md)** - Complete Windows installation guide
+- 📋 **[Setup Summary](docs/SETUP_SUMMARY.md)** - Quick reference for all setup options
 - 🚀 **[GPU Startup Guide](docs/GPU_STARTUP_GUIDE.md)** - CUDA optimization and multi-GPU setup
+- 🔧 **[Troubleshooting](docs/STARTUP_TROUBLESHOOTING.md)** - Common issues and solutions
+
+### 📖 **API Documentation**
+- 📚 **[API Reference](docs/API_REFERENCE.md)** - Complete API documentation
+- 💡 **[API Examples](docs/API_EXAMPLES.md)** - Practical usage examples and SDKs
+
+### 🎙️ **Voice & Audio**
 - 🎤 **[Audio Prompts Guide](docs/AUDIO_PROMPT_TRANSCRIPT_GUIDE.md)** - Voice cloning and audio prompts
 - 🎯 **[Whisper Setup](docs/WHISPER_SETUP_GUIDE.md)** - Automatic transcription setup
 - 🎮 **[Speaker Tags](docs/SPEAKER_TAG_GUIDE.md)** - SillyTavern integration
+
+### 🛠️ **Development**
 - 🛠️ **[Development Guide](docs/CLAUDE.md)** - Architecture and development info
-- 🔧 **[Troubleshooting](docs/STARTUP_TROUBLESHOOTING.md)** - Common issues and solutions
 
 ### Getting Help
 
